@@ -3,3 +3,9 @@ runs/
 dumps/
 connection.json
 *.log
+*.nup
+*.nup.part
+*.nup.metadata-backup.json
+*.audit.json
+*.bytecheck.txt
+.ouncecake-*/

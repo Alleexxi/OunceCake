@@ -17,7 +17,7 @@ For the love of God, do NOT share any files you rip using this tool. It is to be
 
 1. Clone the repo: 
 ``` 
-git clone https://github.com/misshexa66/OunceCake.git
+git clone https://github.com/Alleexxi/OunceCake.git
 ```
 
 2. Use kurumuz's fork of the [ns2jb exploit](https://gitlab.com/kurumuz/ns2jb) to get an RPC connection with the system. Use `node run.cjs --rpc`.
@@ -27,6 +27,53 @@ git clone https://github.com/misshexa66/OunceCake.git
 4. OunceCake will prompt you to pick a game. Pick one, then wait.
 
 5. When OunceCake says `FTP up! ftp://<switch 2 ip>:2121`, use an FTP client to connect to your Switch 2's local IP address with port 2121. A username and password is not required. (Make sure your FTP client has its transfer mode set to Binary/Image/TYPE I.)
+
+### Dumping straight to a .nup
+
+Instead of browsing the FTP yourself, OunceCake can download everything (base, updates and DLC) and pack it into a single `.nup` file:
+
+```
+node ouncecake.cjs <path-to-ns2jb-run> --nup game.nup --ip <switch 2 ip>
+```
+
+Each RomFS is pulled as one big image instead of thousands of small files, reducing per-file FTP overhead. Transfer speed still depends on the console's storage and network. Files are hashed, deduplicated across base/updates and zstd compressed on the PC as they come in. Needs Node 22.15 or newer (for zstd).
+
+#### Switch 2 Editions
+
+A Switch 2 Edition ships a second program (program index 1) inside its update, along with an Upgrade Pack DLC and the updated program 0 RomFS. `--edition` chooses how the `.nup` is packed:
+
+```
+node ouncecake.cjs <path-to-ns2jb-run> --nup game.nup --ip <switch 2 ip> --edition switch2
+```
+
+- `switch2` (the default) packs a self-contained Switch 2 Edition base package with the Switch 2 `0400...` title ID, program 1 ExeFS, and a flattened RomFS combining updated program 0 + Switch 2 Upgrade Pack DLC + program 1 (skipping the unused v1.0.0 base RomFS and dummy unlock DLCs).
+- `switch1` packs the original Switch 1 program (base + program 0 update + DLC).
+- `both` writes two files in one run — `game.nup` (Switch 1) and `game-switch2.nup` (Switch 2) — sharing the common RomFS downloads so shared layers are only pulled once.
+- `all` keeps every dumped package in one file, the way the NUP spec lays a dump out: base, program 0 update, the Switch 2 program as an update with its own `0400...` id, the Upgrade Pack and its data patch. The emulator picks the program and layers the RomFS.
+
+For a game that isn't a Switch 2 Edition, `--edition` makes no difference: there's only one program to pack.
+
+Switch 2 output uses the edition's own name, icon, localized NACP and display version from
+`/Acd_1` inside the update's Control content, when available. Switch 1 output retains the
+base game's Control data. With `all`, the edition metadata is carried on its program package.
+
+#### Add-on data patches
+
+An add-on can be updated by a data patch (content meta type `0x84`, id = add-on id ^ `0x800`). Upgrade Packs use this: Tears of the Kingdom's Upgrade Pack `0100F2C0115B7001` v0 was built for an older Switch 2 program, and data patch `0100F2C0115B7801` brings it in line with the current one. Without it the Switch 2 program can't find its resource tables and crashes at boot.
+
+Data patches are served next to their add-on at `/dlc/<data patch id>/<version>/romfs`. `--edition switch2` layers them over the Upgrade Pack; the other editions pack them as an `addon_update` package (NUP kind 3) under the id of the add-on they update. `OZ_NO_DATA_PATCHES=1` leaves them out.
+
+To see what a title has installed, and whether its data patches open:
+
+```
+node ouncecake.cjs <path-to-ns2jb-run> <title id> --probe
+```
+
+## Development
+
+Run `npm test` for the local FTP and NUP packing tests; no console is needed.
+Run `npm run build` to rebuild the bundled native FTP server. This needs either the
+AArch64 GNU toolchain or Clang, LLD and llvm-objcopy on PATH.
 
 ## Licensing
 

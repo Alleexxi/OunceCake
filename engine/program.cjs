@@ -1,7 +1,8 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { idBytes, fixedOutput, pathRequest, resultError, success, withCleanup, closeHandles } = require('./protocol.cjs');
-const { findOriginalContent, isInstalledUpdate, programMatchesApplication } = require('./content.cjs');
+const crypto = require('node:crypto');
+const { packet, idBytes, fixedOutput, pathRequest, resultError, success, withCleanup, closeHandles } = require('./protocol.cjs');
+const { findOriginalContent, findOriginalAddOn, isInstalledUpdate, programMatchesApplication } = require('./content.cjs');
 const { withProgramIndexMap, openProgramRomfs } = require('./fs-context.cjs');
 
 // if license on most recent account doesn't work, try other ones on the system
@@ -201,14 +202,10 @@ async function prepareInstalledLicense({ s, root, domain, service, title, source
 
   if (result.result) throw resultError('ES prepare installed title license', result.result);
 
-  //patch for nso, actually activate the title
+  // NSO titles also need the prepared keys activated in the license context.
   const context = s.installedLicenseContext?.handle;
-
   if (context && s.handles.has(context)) {
-    success(
-      await s.ipc('Activate prepared title keys', context, 102),
-      'Activate prepared title keys',
-    );
+    success(await s.ipc('Activate prepared title keys', context, 102), 'Activate prepared title keys');
   }
 
   return true;
@@ -288,7 +285,7 @@ async function readLocation(a, resolver, programId) {
   };
 }
 
-async function selectPatch({ attachment: a, title, source, originalSource, operation }) {
+async function selectPatch({ attachment: a, title, source, originalSource, operation, programIndex = 0 }) {
   const runtimeProgramId = source.runtimeProgramId;
   const resolvers = new Map();
   let original;
@@ -337,8 +334,9 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
     const base = { ...basePath, storage: originalSource.storage };
     patch = { ...patchPath, storage: source.storage };
 
-    if (runtimeProgramId !== title) {
-    }
+    // Program[1] (Switch 2 Edition) is its own complete NCA, not part of Program[0]'s patch content,
+    // so the location must point at its own resolved path or the loader opens the wrong NCA (InvalidNcaId)
+    if (programIndex) patch.contentPath = source.contentPath;
 
     const opened = await a.s.ipc('Open registered patch resolver', lr, 1);
 
@@ -353,8 +351,6 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
     attempted = true;
     await writeLocation('Register owned patch location', registered, input, patch);
 
-    const actual = await readLocation(a, registered, runtimeProgramId);
-
     const mount = () =>
       operation({ runtimeProgramId, original: base, patch, originalContent: originalSource });
     const result =
@@ -364,6 +360,7 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
             attachment: a,
             title,
             runtimeProgramId,
+            programIndex,
             operation: mount,
           });
 
@@ -375,6 +372,123 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
     success(await a.s.ipc('Remove owned patch location', registered, 2, idBytes(runtimeProgramId)),
       'Remove owned patch location');
   }, () => closeHandles(a.s, [...resolvers.values(), registered].filter(Boolean)));
+}
+
+// add-on data patches (0x84) use BKTR over their base add-on (id ^ 0x800). Register (patch, addon) in
+// lr's AddOnContentLocationResolver so FS's OpenDataStorageByDataId composes the two
+async function selectDataPatch({ attachment: a, title, source, operation }) {
+  const addonId = (BigInt('0x' + source.contentTitle) ^ 0x800n).toString(16).padStart(16, '0');
+  const owner = (0xf000000000000000n | BigInt('0x' + crypto.randomBytes(7).toString('hex'))).toString(16);
+  let aocLr;
+  let existing = null;
+  let registered = false;
+
+  const decodePath = (bytes) => {
+    const end = bytes.indexOf(0);
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end < 0 ? bytes.length : end));
+  };
+
+  return withCleanup(async () => {
+    const addon = await findOriginalAddOn({
+      s: a.s,
+      domain: a.domain,
+      service: a.service,
+      title,
+      addonTitle: addonId,
+      storages: [source.storage, 4, 5, 2],
+    });
+    source.originalSource = addon;
+
+    const lr = await a.service('lr');
+    aocLr = a.domain.oneHandle(
+      success(await a.s.ipc('OpenAddOnContentLocationResolver', lr, 3), 'OpenAddOnContentLocationResolver'),
+    );
+
+    const prior = await a.s.ipc('GetRegisteredAddOnContentPaths', aocLr, 5, idBytes(addonId), {
+      receive: [
+        { address: a.s.base + 0x4800, size: 0x300, mode: 0 },
+        { address: a.s.base + 0x4c00, size: 0x300, mode: 0 },
+      ],
+    });
+    if (!prior.result) {
+      existing = {
+        path1: decodePath(await a.s.readOwned(a.s.base + 0x4800, 0x300)),
+        path2: decodePath(await a.s.readOwned(a.s.base + 0x4c00, 0x300)),
+        attr1: Buffer.from(prior.data.subarray(0, 16)),
+        attr2: Buffer.from(prior.data.subarray(16, 32)),
+      };
+    } else if ((prior.result & 0x3fffff) !== 0xe08) {
+      throw resultError('GetRegisteredAddOnContentPaths', prior.result);
+    }
+
+    const patchPath = Buffer.alloc(0x300);
+    const addonPath = Buffer.alloc(0x300);
+    patchPath.write(source.contentPath);
+    addonPath.write(addon.contentPath);
+    await a.s.write(a.s.base + 0x4000, patchPath);
+    await a.s.write(a.s.base + 0x4400, addonPath);
+
+    const input = Buffer.alloc(48);
+    idBytes(addonId).copy(input, 0);
+    idBytes(existing ? title : owner).copy(input, 8);
+    input[16] = source.attributes;
+    input[32] = addon.attributes;
+
+    success(
+      await a.s.ipc('RegisterAddOnContentPaths', aocLr, 7, input, {
+        send: [
+          { address: a.s.base + 0x4000, size: 0x300, mode: 0 },
+          { address: a.s.base + 0x4400, size: 0x300, mode: 0 },
+        ],
+      }),
+      'RegisterAddOnContentPaths',
+    );
+    registered = true;
+
+    return operation({ addonId, addon });
+  }, async () => {
+    if (!registered || !aocLr) return;
+    if (!existing) {
+      success(
+        await a.s.ipc('UnregisterApplicationAddOnContent', aocLr, 4, idBytes(owner)),
+        'UnregisterApplicationAddOnContent',
+      );
+      return;
+    }
+    const p1 = Buffer.alloc(0x300);
+    p1.write(existing.path1);
+    await a.s.write(a.s.base + 0x4000, p1);
+    if (existing.path2) {
+      const p2 = Buffer.alloc(0x300);
+      p2.write(existing.path2);
+      await a.s.write(a.s.base + 0x4400, p2);
+      const restore = Buffer.alloc(48);
+      idBytes(addonId).copy(restore, 0);
+      idBytes(title).copy(restore, 8);
+      existing.attr1.copy(restore, 16);
+      existing.attr2.copy(restore, 32);
+      success(
+        await a.s.ipc('Restore AddOnContent paths', aocLr, 7, restore, {
+          send: [
+            { address: a.s.base + 0x4000, size: 0x300, mode: 0 },
+            { address: a.s.base + 0x4400, size: 0x300, mode: 0 },
+          ],
+        }),
+        'Restore AddOnContent paths',
+      );
+    } else {
+      const restore = Buffer.alloc(32);
+      idBytes(addonId).copy(restore, 0);
+      idBytes(title).copy(restore, 8);
+      existing.attr1.copy(restore, 16);
+      success(
+        await a.s.ipc('Restore AddOnContent path', aocLr, 6, restore, {
+          send: [{ address: a.s.base + 0x4000, size: 0x300, mode: 0 }],
+        }),
+        'Restore AddOnContent path',
+      );
+    }
+  }, () => closeHandles(a.s, [aocLr].filter(Boolean)));
 }
 
 function createProgramMounts(attachment) {
@@ -440,6 +554,7 @@ function createProgramMounts(attachment) {
     title: args.title,
     source: args.source,
     originalSource: args.originalSource,
+    programIndex: args.programIndex,
     operation: (selection) => withUpdateLicenses({
       attachment,
       title: args.title,
@@ -469,7 +584,28 @@ function createProgramMounts(attachment) {
       },
     }),
   });
-  return { openCode, openUpdate };
+  const openDataPatch = (args) => selectDataPatch({
+    attachment,
+    title: args.title,
+    source: args.source,
+    operation: ({ addonId, addon }) => withUpdateLicenses({
+      attachment,
+      title: args.title,
+      source: args.source,
+      originalSource: addon,
+      operation: async () => {
+        const input = Buffer.alloc(16);
+        input[0] = 0; // NcmStorageId::None resolves through AddOnContentLocationResolver
+        idBytes(addonId).copy(input, 8);
+        const opened = success(
+          await domain.send(s, 'OpenDataStorageByDataId', attachment.root, packet(202, input)),
+          'OpenDataStorageByDataId',
+        );
+        return domain.oneHandle(opened);
+      },
+    }),
+  });
+  return { openCode, openUpdate, openDataPatch };
 }
 
 module.exports = { createProgramMounts, prepareInstalledLicense };

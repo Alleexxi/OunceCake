@@ -1,7 +1,7 @@
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
 const { success, pathRequest, idBytes, resultError, cleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
-const { discoverUpdates, discoverDlc, resolveProgramContent, resolveDlcContent, programMatchesApplication } = require('./content.cjs');
+const { discoverUpdates, discoverDlc, discoverDataPatches, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl } = require('./content.cjs');
 const { createProgramMounts, prepareInstalledLicense } = require('./program.cjs');
 
 // ncm mounts + metadata used for getting the ftp server ready
@@ -12,13 +12,13 @@ const safeSize = (n) => { // lol, ai put this in. in what situation would this e
 };
 
 function createGameFiles(attachment) {
-  const { openCode, openUpdate } = createProgramMounts(attachment);
+  const { openCode, openUpdate, openDataPatch } = createProgramMounts(attachment);
   let originalSource;
   const { s, root, domain, filesystem, service } = attachment;
 
   const send = async (label, handle, bytes) => success(await domain.send(s, label, handle, bytes), label);
 
-  async function open({ title, storage, section = 'romfs', update, dlc }) {
+  async function open({ title, storage, section = 'romfs', update, dlc, programIndex = 0 }) {
     let source;
     let mounted;
 
@@ -31,6 +31,7 @@ function createGameFiles(attachment) {
         storage,
         update,
         dlc,
+        programIndex,
       });
 
       const { contentPath, attributes } = source;
@@ -56,10 +57,19 @@ function createGameFiles(attachment) {
 
       let handle;
 
-      if (update) {
-        handle = await openUpdate({ title, storage, attributes, source, section, originalSource });
+      // Program[1] has its own RomFS NCA; only Program[0] needs the base + patch composition.
+      if (update && !programIndex) {
+        handle = await openUpdate({ title, storage, attributes, source, section, originalSource, programIndex });
+      } else if (section === 'exefs' && programIndex) {
+        // Program[1] has no base location in LR, so the loader can't see it (0x408) and FS refuses
+        // to hand out a Code filesystem by path (2-6001). Register it through the same patch path the
+        // update code uses, but mapped at program index 1, so the loader can resolve and open its code.
+        handle = await openUpdate({ title, storage, attributes, source, section, originalSource, programIndex });
       } else if (section === 'exefs') {
         handle = await openCode({ title: source.runtimeProgramId, storage, attributes, source });
+      } else if (source.metaType === 0x84) {
+        // add-on data patches (0x84) only store BKTR deltas over their add-on; combine them via lr + FS 202
+        handle = await openDataPatch({ title, source });
       } else {
         // use type 1 for base romfs, type 6 for dlc
         await s.write(s.base + 0x2000, filename);
@@ -317,7 +327,8 @@ const checkIndex = (ok, why) => {
   if (!ok) throw new Error('Invalid FTP index: ' + why);
 };
 
-function buildIndex(views) {
+// images: also expose every romfs as one big file (<prefix>/romfs.img) so it can be pulled in one go
+function buildIndex(views, { images = false } = {}) {
   const nodes = [{ path: '/', name: '', parent: 0, type: 'directory', children: [] }];
   const byPath = new Map([['/', 0]]);
   const entries = new Set();
@@ -405,6 +416,25 @@ function buildIndex(views) {
       byPath.set(filename, id);
       nodes[parent].children.push(id);
     }
+
+    if (images && view.kind !== 'filesystem') {
+      const filename = prefix + '.img';
+      checkIndex(!byPath.has(filename), 'image path collision');
+      const parent = byPath.get(path.posix.dirname(filename));
+      const id = nodes.length;
+      nodes.push({
+        path: filename,
+        name: path.posix.basename(filename),
+        parent,
+        type: 'file',
+        mount: view.mount,
+        offset: 0,
+        size: view.size,
+        sourcePath: view.kind === 'deferred-storage' ? view.source.contentPath : '',
+      });
+      byPath.set(filename, id);
+      nodes[parent].children.push(id);
+    }
   }
 
   for (const node of nodes) {
@@ -451,7 +481,7 @@ function buildIndex(views) {
   return bytes;
 }
 
-async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
+async function prepareGame({ attachment: a, title, images = false, shouldStop = () => false }) {
   const views = [];
   const sources = [];
   const absentSources = [];
@@ -503,7 +533,16 @@ async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
   }
 
   async function mountView(prefix, section, candidates, allowAbsent = false) {
-    if (prefix.includes("update")) {
+    const started = Date.now();
+    try {
+      return await mountViewTimed(prefix, section, candidates, allowAbsent);
+    } finally {
+      if (process.env.OZ_TRACE) console.log('  [trace] ' + prefix + '/' + section + ' took ' + ((Date.now() - started) / 1000).toFixed(1) + ' s');
+    }
+  }
+
+  async function mountViewTimed(prefix, section, candidates, allowAbsent) {
+    if (prefix.startsWith('/updates/')) {
       console.log('Opening ' + prefix + '/' + section, ' (This takes a LOT of time! Don\'t assume we crashed!)');
     } else {
       console.log('Opening ' + prefix + '/' + section);
@@ -537,15 +576,21 @@ async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
         'Could not prepare ' + prefix + '/' + section + ': ' + (lastError?.message || 'No installed content'),
       );
 
-    const entries =
-      mounted.kind === 'storage'
-        ? await readRomfs((offset, length) => {
-            cancelled();
-            return files.read(mounted, offset, length);
-          }, mounted.size)
-        : await filesystemEntries(mounted);
+    let entries;
+    try {
+      entries =
+        mounted.kind === 'storage'
+          ? await readRomfs((offset, length) => {
+              cancelled();
+              return files.read(mounted, offset, length);
+            }, mounted.size)
+          : await filesystemEntries(mounted);
+    } catch (error) {
+      await cleanup([() => files.close(mounted)], error);
+    }
     const mount = sources.length;
-    const deferred = mounted.source.selection === 'dlc';
+    // data patches stay open as a composed storage handle; native FTP can't reopen BKTR patches by single path
+    const deferred = mounted.source.selection === 'dlc' && mounted.source.metaType !== 0x84;
 
     if (deferred) await files.close(mounted);
 
@@ -561,6 +606,7 @@ async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
       mount,
       kind: deferred ? 'deferred-storage' : mounted.kind,
       entries,
+      size: mounted.size || 0,
       source: mounted.source,
     });
     return mounted;
@@ -594,7 +640,45 @@ async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
     installed.filter((candidate) => candidate.storage === base.source.storage),
   );
 
-  for (const group of groups(updates)) {
+  // the control content (NACP + icon) is what names the title and lets a loader register it; the FTP
+  // server doesn't serve it, so for a .nup we read it here and carry it into the meta
+  let control = null;
+  if (images) {
+    cancelled();
+    try {
+      control = await readControl(a, title, [base.source.storage, 4, 5, 2]);
+      if (control) console.log('Control: ' + (control.name || '(no name)') + (control.icon ? ', icon ' + control.icon.length + ' bytes' : ', no icon'));
+      else console.log('Control: none found (the nup will have no name or icon)');
+    } catch (error) {
+      console.log('Could not read control content: ' + error.message);
+    }
+  }
+
+  // only the newest version of each update title is kept: older ones are fully superseded and just bloat
+  // the dump (and the stale game-card update is the one that tends to stall). OZ_ALL_UPDATE_VERSIONS=1
+  // packs every version; OZ_SKIP_UPDATES=65536,131072 still drops specific versions by hand
+  const allUpdates = [...groups(updates)];
+  const newestVersion = new Map();
+  for (const group of allUpdates) {
+    const { contentTitle, version } = group[0];
+    newestVersion.set(contentTitle, Math.max(newestVersion.get(contentTitle) ?? -1, version));
+  }
+
+  const skipped = new Set((process.env.OZ_SKIP_UPDATES || '').split(',').filter(Boolean).map(Number));
+  const keepAll = Boolean(process.env.OZ_ALL_UPDATE_VERSIONS);
+  const updateGroups = allUpdates.filter((group) => {
+    const { contentTitle, version, storage } = group[0];
+    const stale = !keepAll && version !== newestVersion.get(contentTitle);
+    const why = skipped.has(version)
+      ? ' (skipped)'
+      : stale
+        ? ' (superseded by ' + newestVersion.get(contentTitle) + ')'
+        : '';
+    console.log('Update ' + version + ': title ' + contentTitle.toUpperCase() + ', storage ' + storage + why);
+    return !skipped.has(version) && !stale;
+  });
+
+  for (const group of updateGroups) {
     const prefix = '/updates/' + group[0].version;
 
     const candidates = group.map((item) => ({
@@ -619,9 +703,77 @@ async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
     await mountView(prefix, 'romfs', candidates);
   }
 
+  // add-on data patches (content meta 0x84) carry newer data for an add-on, e.g. a Switch 2 Upgrade Pack
+  // built for the current program. Served next to their add-on at /dlc/<data patch id>/<ver>/romfs; one
+  // that FS won't open as a complete RomFS is logged and skipped. OZ_NO_DATA_PATCHES=1 skips them all
+  const dataPatches = process.env.OZ_NO_DATA_PATCHES ? [] : await discoverDataPatches({ ...a, title });
+  for (const patch of dataPatches) {
+    const prefix = '/dlc/' + patch.contentTitle + '/' + patch.version;
+    try {
+      await mountView(prefix, 'romfs', [{
+        storage: patch.storage,
+        dlc: { contentTitle: patch.contentTitle, version: patch.version },
+      }]);
+    } catch (error) {
+      if (error.code === 'FTP_CANCELLED') throw error;
+      console.log('Could not open data patch ' + prefix + ': ' + error.message);
+    }
+  }
+
+  // Switch 2 Edition program (id_offset 1) of every update, served at /switch2/updates/<ver>/romfs.
+  // Games without one just log a line; OZ_NO_SWITCH2=1 skips the attempt
+  let editionControlVersion = -1;
+  for (const group of process.env.OZ_NO_SWITCH2 ? [] : updateGroups) {
+    const prefix = '/switch2/updates/' + group[0].version;
+    const candidates = group.map((item) => ({
+      storage: item.storage,
+      update: { contentTitle: item.contentTitle, version: item.version },
+      programIndex: 1,
+    }));
+
+    let program;
+
+    try {
+      program = await mountView(prefix, 'romfs', candidates);
+    } catch (error) {
+      if (error.code === 'FTP_CANCELLED') throw error;
+
+      console.log('No Switch 2 Edition program at ' + prefix + ': ' + error.message);
+      continue;
+    }
+
+    try {
+      await mountView(
+        prefix,
+        'exefs',
+        candidates.filter((candidate) => candidate.storage === program.source.storage),
+      );
+    } catch (error) {
+      if (error.code === 'FTP_CANCELLED') throw error;
+
+      console.log('Could not open ' + prefix + '/exefs: ' + error.message);
+    }
+
+    if (images && group[0].version > editionControlVersion) {
+      cancelled();
+      const editionControl = await readControl(a, title, [program.source.storage], {
+        update: { contentTitle: group[0].contentTitle, version: group[0].version },
+        programIndex: 1,
+      });
+      if (editionControl) {
+        control = { ...control, switch2: editionControl };
+        editionControlVersion = group[0].version;
+        console.log('Switch 2 Control: ' + (editionControl.name || '(no name)'));
+      }
+    }
+  }
+
   const ncm = await a.service('ncm');
   const pinned = new Set();
-  const selectedSources = [...sources.map((item) => item.source), ...absentSources];
+  const selectedSources = [
+    ...sources.flatMap((item) => [item.source, item.source.originalSource].filter(Boolean)),
+    ...absentSources,
+  ];
 
   for (const source of selectedSources) {
     cancelled();
@@ -654,16 +806,63 @@ async function prepareGame({ attachment: a, title, shouldStop = () => false }) {
 
       if (content.result) throw resultError('FTP pin source content', content.result);
 
-      for (const other of selectedSources.filter(
-        (item) => item.storage === source.storage && (item.contentTitle || title) === contentTitle,
-      )) {
-      }
     } finally {
       await a.s.close(database);
     }
   }
 
-  return { index: buildIndex(views), sources };
+  return { index: buildIndex(views, { images }), sources, views, control };
 }
 
-module.exports = { prepareGame, readRomfs, buildIndex };
+// --probe: open each add-on data patch the way prepareGame does and summarize what FS hands back
+async function probeDataPatches({ attachment: a, title, patches }) {
+  const files = createGameFiles(a);
+  const results = [];
+
+  for (const patch of patches) {
+    const result = { ...patch };
+    let mounted;
+
+    try {
+      const options = {
+        title,
+        storage: patch.storage,
+        section: 'romfs',
+        dlc: { contentTitle: patch.contentTitle, version: patch.version },
+      };
+
+      try {
+        mounted = await files.open(options);
+      } catch (error) {
+        if (error.nativeResult?.canonical !== 0x7d802) throw error;
+        await prepareInstalledLicense({ ...a, title, source: error.source });
+        mounted = await files.open(options);
+      }
+
+      result.contentPath = mounted.source.contentPath;
+      result.size = mounted.size;
+      const read = (offset, length) => files.read(mounted, offset, length);
+      const entries = await readRomfs(read, mounted.size);
+      result.files = entries.filter((e) => e.type === 'file').length;
+      result.tables = entries
+        .filter((e) => /^\/System\/(Resource\/ResourceSizeTable|AddressTable\/|AoCUpgradeVersion)/.test(e.path))
+        .map((e) => e.path + ' (' + e.size + ' bytes)');
+
+      const mask = entries.find((e) => e.path === '/System/RegionLangMask.txt');
+      if (mask && mask.size < 0x1000) {
+        result.regionLangMask = (await read(mask.offset, mask.size)).toString('utf8').split(/\r?\n/).slice(1).join(' | ');
+      }
+    } catch (error) {
+      result.error = error.message;
+      if (!result.contentPath && error.source?.contentPath) result.contentPath = error.source.contentPath;
+    } finally {
+      if (mounted) await files.close(mounted).catch(() => {});
+    }
+
+    results.push(result);
+  }
+
+  return results;
+}
+
+module.exports = { prepareGame, readRomfs, buildIndex, probeDataPatches };

@@ -30,10 +30,8 @@ function candidates(bytes, layout) {
 
 async function findRegistryInterface({ memory, layout }) {
   const row = candidates(await memory.read(layout.table, layout.count * 0x30), layout);
-  const domain = await memory.read(row.domain, 0x20);
   const header = await memory.read(row.object, 0x18);
 
-  const caller = header.readBigUInt64LE(8);
   return {
     ...row,
     identity: header.subarray(0, 16).toString('hex'),
@@ -76,8 +74,6 @@ async function copyProgramRegistry({ attachment: a, reader }) {
     const entry = layout.table + (auxiliary.root - 1) * 0x30;
     const b = await memory.read(entry, 0x30);
     const domain = ptr(b, 0x18);
-    const object = ptr(b, 0x20);
-    const h = await memory.read(object, 0x40);
     state.auxiliary = { ...auxiliary, entry, domain, originalPair: b.subarray(0x20).toString('hex') };
     swapping = true;
     await memory.write(entry + 0x20, b.subarray(0x20), Buffer.from(source.pair, 'hex'));
@@ -114,13 +110,13 @@ async function copyProgramRegistry({ attachment: a, reader }) {
   }
 }
 
-function accessControls(bytes, title) {
-  function region(at, size, minimum) {
+function accessControls(bytes) {
+  function region(at, size) {
     return bytes.subarray(at, at + size);
   }
 
-  const aci = region(bytes.readUInt32LE(0x70), bytes.readUInt32LE(0x74), 0x40);
-  const acid = region(bytes.readUInt32LE(0x78), bytes.readUInt32LE(0x7c), 0x240);
+  const aci = region(bytes.readUInt32LE(0x70), bytes.readUInt32LE(0x74));
+  const acid = region(bytes.readUInt32LE(0x78), bytes.readUInt32LE(0x7c));
   // oz is rsa-3072, 0x300
   // nx is rsa-2048, 0x200
   const header =
@@ -129,21 +125,15 @@ function accessControls(bytes, title) {
       : acid.length >= 0x340 && acid.toString('ascii', 0x300, 0x304) === 'ACID'
         ? 0x300
         : -1;
-  const program = BigInt('0x' + title);
 
-  function control(parent, field, minimum) {
+  function control(parent, field) {
     const at = parent.readUInt32LE(field);
     const size = parent.readUInt32LE(field + 4);
     return Buffer.from(parent.subarray(at, at + size));
   }
 
-  const fah = control(aci, 0x20, 0x1c);
-  const fac = control(acid, header + 0x20, 0x2c);
-
-  for (const field of [0xc, 0x14]) {
-    const at = fah.readUInt32LE(field);
-    const size = fah.readUInt32LE(field + 4);
-  }
+  const fah = control(aci, 0x20);
+  const fac = control(acid, header + 0x20);
 
   return { fah, fac };
 }
@@ -152,13 +142,16 @@ async function registryReader(a) {
   const engine = path.join(a.run, 'switch2');
   const layout = JSON.parse(await fs.readFile(path.join(engine, 'ro', a.live.session + '-layout.json')));
   const memory = await require(path.join(engine, 'tools/fs-memory.cjs')).connect();
+  const { traceMethod } = require('./session.cjs');
+  traceMethod(memory, 'read', (at, length) => 'memory read ' + length + ' bytes');
+  traceMethod(memory, 'write', (at) => 'memory write');
 
   return { memory, layout };
 }
 
 // your romfs. hand it over.
 async function openProgramRomfs({ attachment: a, title, storage, policy }) {
-  const controls = accessControls(policy, title);
+  const controls = accessControls(policy);
   const reader = await registryReader(a);
   // random ID for telling the system "look this very real process that's totally the game wants data"
   const owner = 0xf000000000000000n | BigInt('0x' + crypto.randomBytes(7).toString('hex'));
@@ -189,7 +182,7 @@ async function openProgramRomfs({ attachment: a, title, storage, policy }) {
   }, () => reference?.close());
 }
 
-async function restoreProgramRoot(memory, owner, fields) {
+async function restoreProgramRoot(memory, fields) {
   await cleanup([...fields].reverse().map((field) => async () => {
     const original = Buffer.from(field.original, 'hex');
     const current = await memory.read(field.address, 8);
@@ -210,12 +203,10 @@ async function openCurrentProgramRomfs({ attachment: a, reader, owner }) {
 
       const entry = layout.table + (client.root - 1) * 0x30;
       const b = await memory.read(entry, 0x30);
-      const domain = ptr(b, 0x18);
       const root = ptr(b, 0x20);
       const h = await memory.read(root, 0x40);
 
       const nca = ptr(h, 0x10);
-      const control = ptr(h, 0x18);
       const n = await memory.read(nca, 0x30);
       fields = [
         {
@@ -257,7 +248,7 @@ async function openCurrentProgramRomfs({ attachment: a, reader, owner }) {
 
       storage = a.domain.oneHandle(copied);
       return storage;
-    }, () => restoreProgramRoot(memory, owner, fields), () => client && a.s.close(client.handle));
+    }, () => restoreProgramRoot(memory, fields), () => client && a.s.close(client.handle));
   } catch (error) {
     await cleanup([() => storage && a.s.close(storage)], error);
   }
@@ -290,11 +281,10 @@ async function programMapReader(attachment) {
     const header = await memory.read(head, 16);
     const seen = new Set();
     const rows = [];
-    const captures = [];
     let node = Number(header.readBigUInt64LE(8));
-    let previous = head;
 
     while (node !== head) {
+      if (seen.has(node)) throw new Error('Cycle in the original program mapping list');
       seen.add(node);
 
       const bytes = await memory.read(node, 0x28);
@@ -304,12 +294,7 @@ async function programMapReader(attachment) {
         programIndex: bytes[0x20],
         flags: bytes[0x21],
       });
-      captures.push({ node, bytes });
-      previous = node;
       node = Number(bytes.readBigUInt64LE(8));
-    }
-
-    for (const item of captures) {
     }
 
     return normalized(rows);
@@ -318,14 +303,13 @@ async function programMapReader(attachment) {
   return { entries };
 }
 
-async function withProgramIndexMap({ attachment: a, title, runtimeProgramId, operation }) {
+async function withProgramIndexMap({ attachment: a, title, runtimeProgramId, operation, programIndex = 0 }) {
   const reader = await programMapReader(a);
   const before = await reader.entries();
-  const mapping = { programId: runtimeProgramId, applicationId: title, programIndex: 0, flags: 0 };
+  const mapping = { programId: runtimeProgramId, applicationId: title, programIndex, flags: 0 };
   const existing = before.find((row) => row.programId === runtimeProgramId);
   if (existing) {
-    return withCleanup(operation, async () => {
-    });
+    return operation();
   }
   // fs 810 counts 0 as a no-op
   const active = normalized([...before, mapping]);

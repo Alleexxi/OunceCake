@@ -101,6 +101,32 @@ async function openServiceWithFallback({ s, sm, name }) {
   }
 }
 
+// OZ_TRACE=1 logs every console call and how long it took, to find what's slow
+const tracing = Boolean(process.env.OZ_TRACE);
+
+function traceMethod(target, name, describe) {
+  if (!tracing || target[name].traced) return;
+
+  const original = target[name];
+  const traced = async function (...args) {
+    const started = Date.now();
+    const what = describe(...args);
+    // anything still running after 10s gets announced, so a call that never returns is visible
+    const slow = setTimeout(() => console.log('  [trace] still waiting on ' + what), 10000);
+
+    try {
+      return await original.apply(this, args);
+    } finally {
+      clearTimeout(slow);
+      const took = Date.now() - started;
+      if (took >= 200) console.log('  [trace] ' + what + ': ' + took + ' ms');
+    }
+  };
+
+  traced.traced = true;
+  target[name] = traced;
+}
+
 //attach to run from ns2jb, get handles for it's stuff
 async function attachGame(run) {
   const engine = path.join(run, 'switch2');
@@ -115,6 +141,8 @@ async function attachGame(run) {
 
   const s = new Session('game-attach-' + Date.now(), 0x80000);
   s.record = async () => {};
+  traceMethod(s, 'ipc', (label) => 'ipc ' + label);
+  traceMethod(domain, 'send', (_, label) => 'send ' + label);
   try {
     await s.initialize();
     const root = domain.oneHandle(success(await domain.send(
@@ -134,4 +162,4 @@ async function attachGame(run) {
   }
 }
 
-module.exports = { attachGame };
+module.exports = { attachGame, traceMethod };

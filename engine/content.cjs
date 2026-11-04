@@ -116,6 +116,90 @@ async function discoverInstalled({ s, domain, service, title, metaType, kind }) 
   return records;
 }
 
+const META_TYPES = {
+  0x80: 'Application', 0x81: 'Patch', 0x82: 'AddOnContent', 0x83: 'Delta', 0x84: 'DataPatch',
+};
+
+// every installed content meta key in an application's id group (base, patch, add-ons and their
+// data patches, Switch 2 programs), whatever its type. --probe prints this
+async function listApplicationContent({ s, domain, service, title }) {
+  const ncm = await service('ncm');
+  const group = BigInt('0x' + title) & 0x00ffffffffffe000n;
+  const out = [];
+
+  for (const storage of [4, 5, 2]) {
+    let database;
+
+    try {
+      await withCleanup(async () => {
+        database = domain.oneHandle(
+          success(await s.ipc('Open content metadata database', ncm, 5, Buffer.from([storage])),
+            'OpenContentMetaDatabase'),
+        );
+
+        async function list(min, max) {
+          const input = Buffer.alloc(32);
+          input[0] = 0; // ContentMetaType::Unknown matches every type
+          input.writeBigUInt64LE(min, 16);
+          input.writeBigUInt64LE(max, 24);
+
+          const address = s.base + 0x6000;
+          const capacity = 32;
+          const reply = success(
+            await s.ipc('List installed content', database, 5, input, {
+              receive: [{ address, size: capacity * 16, mode: 0 }],
+            }),
+            'List installed content',
+          );
+          const total = reply.data.readInt32LE();
+          const count = reply.data.readInt32LE(4);
+          const bytes = await s.readOwned(address, capacity * 16);
+
+          for (let i = 0; i < count; i++) {
+            const key = bytes.subarray(i * 16, (i + 1) * 16);
+            out.push({
+              id: key.readBigUInt64LE().toString(16).padStart(16, '0'),
+              version: key.readUInt32LE(8),
+              type: key[12],
+              typeName: META_TYPES[key[12]] || 'type 0x' + key[12].toString(16),
+              installType: key[13],
+              storage,
+            });
+          }
+
+          if (total <= count || min === max) return;
+
+          const mid = (min + max) / 2n;
+          await list(min, mid);
+          await list(mid + 1n, max);
+        }
+
+        for (const platform of [0x01n, 0x04n]) {
+          const low = (platform << 56n) | group;
+          await list(low, low | 0x1fffn);
+        }
+      }, () => closeHandles(s, database ? [database] : []));
+    } catch (error) {
+      if (!inactive.has(error.nativeResult?.canonical)) throw error;
+    }
+  }
+
+  return out.sort((a, b) => a.id.localeCompare(b.id) || a.version - b.version || a.storage - b.storage);
+}
+
+// add-on data patches (content meta 0x84): an update for an add-on, id = add-on id ^ 0x800
+async function discoverDataPatches(options) {
+  const latest = new Map();
+  for (const item of await listApplicationContent(options)) {
+    if (item.type !== 0x84) continue;
+    const known = latest.get(item.id);
+    if (!known || item.version > known.version) {
+      latest.set(item.id, { contentTitle: item.id, version: item.version, storage: item.storage });
+    }
+  }
+  return [...latest.values()];
+}
+
 const discoverUpdates = (options) => discoverInstalled({ ...options, metaType: 0x81, kind: 'updates' });
 const discoverDlc = (options) => discoverInstalled({ ...options, metaType: 0x82, kind: 'dlc' });
 const discoverApplications = (options) =>
@@ -125,7 +209,7 @@ const discoverApplications = (options) =>
 
 
 
-async function resolveContent({ s, domain, service, title, storage, update, dlc, contentType = 1 }) {
+async function resolveContent({ s, domain, service, title, storage, update, dlc, contentType = 1, programIndex = 0 }) {
   const contentName = { 1: 'Program', 2: 'Data', 3: 'Control' }[contentType];
 
   const handles = [];
@@ -162,11 +246,18 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
     input[0] = contentType;
     key.copy(input, 8);
 
-    const content = success(await s.ipc('GetContentIdByType', database, 3, input), 'GetContentIdByType');
+    // Switch 2 Editions ship a second Program (id_offset 1, program id 04...) in the same package.
+    // GetContentIdByTypeAndIdOffset / GetContentInfoByTypeAndIdOffset (20/25) take id_offset as a u8
+    // right after the content type
+    if (programIndex) input[1] = programIndex;
+
+    const content = programIndex
+      ? success(await s.ipc('GetContentIdByTypeAndIdOffset', database, 20, input), 'GetContentIdByTypeAndIdOffset')
+      : success(await s.ipc('GetContentIdByType', database, 3, input), 'GetContentIdByType');
     const contentId = Buffer.from(content.data.subarray(0, 16));
 
     const info = success(
-      await s.ipc('Get installed ' + contentName + ' content information', database, 24, input),
+      await s.ipc('Get installed ' + contentName + ' content information', database, programIndex ? 25 : 24, input),
       'Get installed ' + contentName + ' content information',
     ).data;
 
@@ -209,6 +300,8 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
       });
     }
 
+    if (programIndex) source.programIndex = programIndex;
+
     if (dlc) {
       Object.assign(source, {
         selection: 'dlc',
@@ -223,7 +316,7 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
 
 const resolveProgramContent = (options) => resolveContent({ ...options, dlc: undefined, contentType: 1 });
 const resolveControlContent = (options) =>
-  resolveContent({ ...options, dlc: undefined, update: undefined, contentType: 3 });
+  resolveContent({ ...options, dlc: undefined, contentType: 3 });
 const resolveDlcContent = (options) => {
   return resolveContent({ ...options, contentType: 2 });
 };
@@ -239,6 +332,25 @@ async function findOriginalContent(options) {
   }
 
   throw new Error('No installed base Program content was found');
+}
+
+async function findOriginalAddOn(options) {
+  const { addonTitle, storages = [4, 5, 2] } = options;
+  const seen = new Set();
+
+  for (const storage of storages) {
+    if (seen.has(storage)) continue;
+    seen.add(storage);
+
+    try {
+      return await resolveDlcContent({ ...options, storage, dlc: { contentTitle: addonTitle } });
+    } catch (error) {
+      const absent = new Set([0xe05, 0x21005, 0x20a05]);
+      if (!absent.has(error.nativeResult?.canonical)) throw error;
+    }
+  }
+
+  throw new Error('No installed base AddOnContent was found for ' + addonTitle.toUpperCase());
 }
 
 // handling for switch 2 editions, mainly. their switch 2 updates seem to have different title ids from their base apps
@@ -295,37 +407,107 @@ function optionalName(bytes) {
   try { return applicationName(bytes); } catch { return null; }
 }
 
-async function controlName({ s, root, domain, service, filesystem }, game) {
-  for (const storage of game.storages) {
+const decodeString = (bytes) => {
+  const end = bytes.indexOf(0);
+  const slice = bytes.subarray(0, end < 0 ? bytes.length : end);
+  try { return cleanName(new TextDecoder('utf-8', { fatal: true }).decode(slice)) || null; } catch { return null; }
+};
+
+// name + publisher from the same language entry, plus the display version (0x3060), out of a NACP
+function controlDetails(nacp) {
+  let name = null;
+  let publisher = null;
+
+  try {
+    const format = nacp[0x3215];
+    let titles = nacp.subarray(0, 0x3000);
+    if (format === 1) {
+      const size = titles.readUInt16LE();
+      titles = inflateRawSync(titles.subarray(2, 2 + size), { maxOutputLength: 32 * 0x300 });
+    }
+    for (let i = 0; i < titles.length / 0x300; i++) {
+      const candidate = decodeString(titles.subarray(i * 0x300, i * 0x300 + 0x200));
+      if (candidate) {
+        name = candidate;
+        publisher = decodeString(titles.subarray(i * 0x300 + 0x200, i * 0x300 + 0x300));
+        break;
+      }
+    }
+  } catch {}
+
+  let version = null;
+  try { version = decodeString(nacp.subarray(0x3060, 0x3070)); } catch {}
+
+  return { name, publisher, version };
+}
+
+// a title's control content: the whole NACP (for the nup's TLV 0x0002) plus its name/publisher/
+// version and the default icon. tries each storage until one answers
+async function readControl({ s, root, domain, service, filesystem }, title, storages = [4, 5, 2],
+  { update, programIndex = 0 } = {}) {
+  const seen = new Set();
+  for (const storage of storages) {
+    if (seen.has(storage)) continue;
+    seen.add(storage);
+
     const handles = [];
-    const name = await withCleanup(async () => {
+    const result = await withCleanup(async () => {
       try {
-        const source = await resolveControlContent({ s, domain, service, title: game.title, storage });
+        const source = await resolveControlContent({ s, domain, service, title, storage, update });
         const filename = Buffer.alloc(0x301);
         filename.write(source.contentPath);
         await s.write(s.base + 0x2000, filename);
         const input = Buffer.alloc(16);
         input[0] = source.attributes;
         input.writeUInt32LE(3, 4);
-        idBytes(game.title).copy(input, 8);
+        idBytes(title).copy(input, 8);
         const opened = success(await domain.send(
           s, 'Open installed game control metadata', root, pathRequest(10, input, s.base + 0x2000),
         ), 'Open installed game control metadata');
         const control = domain.oneHandle(opened);
         handles.push(control);
-        const file = success(await filesystem.openFile(s, control, '/control.nacp'),
+
+        // Edition metadata is inside the update's shared Control NCA, under /Acd_<program index>.
+        const prefix = programIndex ? '/Acd_' + programIndex : '';
+        const nacpFile = success(await filesystem.openFile(s, control, prefix + '/control.nacp'),
           'Open installed game control property');
-        handles.push(file.handle);
-        if (await filesystem.fileSize(s, file.handle) < 0x4000n) return null;
-        return optionalName(await filesystem.readFile(s, file.handle, 0, 0x4000));
+        handles.push(nacpFile.handle);
+        if (await filesystem.fileSize(s, nacpFile.handle) < 0x4000n) return null;
+        const nacp = await filesystem.readFile(s, nacpFile.handle, 0, 0x4000);
+
+        let icon = null;
+        try {
+          const entries = await filesystem.listDirectory(s, control, prefix || '/');
+          const found = entries.find((entry) => /^icon_.*\.dat$/i.test(entry.name) && Number(entry.size) > 0);
+          if (found) {
+            const size = Number(found.size);
+            if (size > 0 && size <= 4 * 1024 * 1024) {
+              const iconFile = success(await filesystem.openFile(s, control, prefix + '/' + found.name), 'Open control icon');
+              handles.push(iconFile.handle);
+              const chunks = [];
+              for (let at = 0; at < size; at += 0x40000) {
+                chunks.push(await filesystem.readFile(s, iconFile.handle, at, Math.min(0x40000, size - at)));
+              }
+              icon = Buffer.concat(chunks, size);
+            }
+          }
+        } catch {}
+
+        return { nacp, icon, ...controlDetails(nacp) };
       } catch (error) {
         if (!error.nativeResult) throw error;
         return null;
       }
     }, () => closeHandles(s, handles));
-    if (name) return name;
+
+    if (result) return result;
   }
   return null;
+}
+
+async function controlName(context, game) {
+  const control = await readControl(context, game.title, game.storages);
+  return control?.name || null;
 }
 
 async function discoverGames({ s, root, domain, service, filesystem, shouldStop = () => false }) {
@@ -413,7 +595,7 @@ async function discoverGames({ s, root, domain, service, filesystem, shouldStop 
 }
 
 module.exports = {
-  discoverGames, discoverUpdates, discoverDlc,
-  resolveProgramContent, resolveDlcContent, findOriginalContent,
-  isInstalledUpdate, programMatchesApplication,
+  discoverGames, discoverUpdates, discoverDlc, discoverDataPatches, listApplicationContent,
+  resolveProgramContent, resolveDlcContent, findOriginalContent, findOriginalAddOn,
+  isInstalledUpdate, programMatchesApplication, readControl,
 };
