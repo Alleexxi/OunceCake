@@ -15,7 +15,7 @@ For the love of God, do NOT share any files you rip using this tool. It is to be
 
 1. Clone the repo: 
 ``` 
-git clone https://github.com/Alleexxi/OunceCake.git Yoink
+git clone https://github.com/Alleexxi/Yoink.git
 ```
 
 2. Use kurumuz's fork of the [ns2jb exploit](https://gitlab.com/kurumuz/ns2jb) to get an RPC connection with the system. Use `node run.cjs --rpc`.
