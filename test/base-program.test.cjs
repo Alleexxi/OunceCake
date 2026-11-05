@@ -35,10 +35,14 @@ const zeroHeader = (base = source) => Object.assign(new Error('Invalid RomFS: ze
   code: 'GAME_ROMFS_ZERO_HEADER', source: base,
 });
 
-test('zero header gets a distinct error; other malformed headers stay fatal', async () => {
+test('zero header prefix gets a distinct error even when the rest of the header contains data', async () => {
   await assert.rejects(readRomfs(async () => Buffer.alloc(0x50), 11835686912), { code: 'GAME_ROMFS_ZERO_HEADER' });
+  const prefix = Buffer.alloc(0x50, 0xff);
+  prefix.fill(0, 0, 16);
+  await assert.rejects(readRomfs(async () => prefix, 11835686912), (error) =>
+    error.code === 'GAME_ROMFS_ZERO_HEADER' && /firstU64=0x0 first16hex=00000000000000000000000000000000/.test(error.message));
   await assert.rejects(readRomfs(async () => Buffer.alloc(0x50, 1), 11835686912),
-    (error) => !error.code && /Invalid RomFS/.test(error.message));
+    (error) => error.code === 'GAME_ROMFS_INVALID_HEADER' && /first16hex=01010101010101010101010101010101/.test(error.message));
 });
 
 test('readable base keeps its original RomFS and ExeFS path', async () => {

@@ -11,14 +11,14 @@ async function prepareBaseProgram({ mountView, installed, updateGroups, readCode
     const companion = updateGroups.find((group) => group.some((item) =>
       item.storage === source.storage && item.version === source.version));
     if (!companion) {
-      throw new Error('Game-card base has a zero-filled RomFS header, but no selected same-version card patch is available.', { cause: error });
+      throw new Error('Game-card base has a zero-filled RomFS header prefix, but no selected same-version card patch is available.', { cause: error });
     }
 
     const candidates = companion.filter((item) => item.storage === source.storage).map((item) => ({
       storage: item.storage,
       update: { contentTitle: item.contentTitle, version: item.version },
     }));
-    console.log('Base RomFS has a zero-filled header; trying composed game-card program with patch ' +
+    console.log('Base RomFS has a zero-filled header prefix; trying composed game-card program with patch ' +
       companion[0].contentTitle + ' v' + source.version + '.');
     console.log('  Base NCA: ' + source.contentPath);
     base = await mountView('/base', 'romfs', candidates);

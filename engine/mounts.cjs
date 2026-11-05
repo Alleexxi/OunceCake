@@ -220,11 +220,18 @@ async function readRomfs(read, storageSize) {
   }
 
   const header = await exact(0, 0x50);
-  if (header.length === 0x50 && header.every((byte) => byte === 0)) {
-    throw Object.assign(new Error('Invalid RomFS: zero-filled header'), { code: 'GAME_ROMFS_ZERO_HEADER' });
+  const first = header.readBigUInt64LE();
+  if (first !== 0x50n) {
+    const details = 'storageSize=' + storageSize + ' firstU64=0x' + first.toString(16) +
+      ' first16hex=' + header.subarray(0, 16).toString('hex');
+    // The diagnostic from affected cards only established a zero-filled prefix,
+    // not a zero-filled 0x50-byte header. Later bytes can belong to another layer.
+    const zeroPrefix = header.subarray(0, 16).every((byte) => byte === 0);
+    throw Object.assign(new Error('Invalid RomFS: header size (' + details + ')'), {
+      code: zeroPrefix ? 'GAME_ROMFS_ZERO_HEADER' : 'GAME_ROMFS_INVALID_HEADER',
+    });
   }
   const h = Array.from({ length: 10 }, (_, i) => integer(header.readBigUInt64LE(i * 8)));
-  checkRomfs(h[0] === 0x50, 'header size');
 
   const ranges = [];
 
@@ -594,6 +601,10 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
           : await filesystemEntries(mounted);
     } catch (error) {
       error.source = mounted.source;
+      if (error.code === 'GAME_ROMFS_ZERO_HEADER' || error.code === 'GAME_ROMFS_INVALID_HEADER') {
+        error.message += ' [title=' + title + ' storage=' + mounted.source.storage +
+          ' version=' + mounted.source.version + ' NCA=' + mounted.source.contentPath + ']';
+      }
       await cleanup([() => files.close(mounted)], error);
     }
     const mount = sources.length;

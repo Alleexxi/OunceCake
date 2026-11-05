@@ -46,7 +46,7 @@ The console's IP is detected automatically from the active RPC connection. You c
 
 Each RomFS is pulled as one big image instead of thousands of small files, reducing per-file FTP overhead. Transfer speed still depends on the console's storage and network. Files are hashed, deduplicated across base/updates and zstd compressed on the PC as they come in. Needs Node 22.15 or newer (for zstd).
 
-Experimental game-card fallback: when the base RomFS header is entirely zero and a selected same-version patch exists on the same card, Yoink tries composing the two through the console. It validates the composed RomFS tree and the `main`/`main.npdm` headers before serving or packing them as one base package at the patch version. The standalone base ExeFS is skipped, and the companion patch is not packed twice. Other malformed headers still fail. This path needs confirmation on affected cards such as MOUSE: P.I. For Hire.
+Experimental game-card fallback: when the first 16 bytes of the base RomFS header are zero and a selected same-version patch exists on the same card, Yoink tries composing the two through the console. It validates the composed RomFS tree and the `main`/`main.npdm` headers before serving or packing them as one base package at the patch version. The standalone base ExeFS is skipped, and the companion patch is not packed twice. Other malformed headers still fail, with the storage size and header prefix included in the error. This path needs confirmation on affected cards such as MOUSE: P.I. For Hire.
 
 #### Switch 2 Editions
 
