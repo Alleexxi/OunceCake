@@ -11,22 +11,25 @@ async function prepareBaseProgram({ mountView, installed, updateGroups, readCode
     const companion = updateGroups.find((group) => group.some((item) =>
       item.storage === source.storage && item.version === source.version));
     if (!companion) {
-      throw new Error('Game-card base has a zero-filled RomFS header prefix, but no selected same-version card patch is available.', { cause: error });
+      throw new Error('The base game could not be read on its own, and no selected same-version card patch is available. Yoink needs the matching update on this game card to try combining them.', { cause: error });
     }
 
     const candidates = companion.filter((item) => item.storage === source.storage).map((item) => ({
       storage: item.storage,
       update: { contentTitle: item.contentTitle, version: item.version },
     }));
-    console.log('Base RomFS has a zero-filled header prefix; trying composed game-card program with patch ' +
-      companion[0].contentTitle + ' v' + source.version + '.');
-    console.log('  Base NCA: ' + source.contentPath);
+    console.log('The base game could not be read on its own.');
+    console.log('Asking the Switch to combine it with the update on this game card. This may take a while.');
+    if (process.env.YOINK_TRACE || process.env.OZ_TRACE) {
+      console.log('  [trace] Card update: ' + companion[0].contentTitle + ' v' + source.version);
+      console.log('  [trace] Base NCA: ' + source.contentPath);
+    }
     base = await mountView('/base', 'romfs', candidates);
     base.source.originalSource = source;
     const code = await mountView('/base', 'exefs', candidates.filter((item) => item.storage === base.source.storage));
     code.source.originalSource = source;
     await validateProgramEntries(code.entries, (filename, size) => readCodeHeader(code, filename, size));
-    console.log('Composed game-card RomFS and ExeFS validated; exporting them as the base package.');
+    console.log('Base game + card update opened and checked successfully. Yoink will dump the combined game files.');
     return { base, composedUpdate: companion[0] };
   }
 
