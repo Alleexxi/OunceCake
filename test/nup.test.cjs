@@ -175,7 +175,10 @@ function readArchive(bytes) {
     const romfs = new Map();
     const romfsDir = toc.readUInt32LE(at + 0x10);
     if (romfsDir !== 0xffffffff) tree(romfsDir, '/', romfs);
-    return { id: toc.readBigUInt64LE(at).toString(16).padStart(16, '0'), kind: toc[at + 0x18], tags, romfs };
+    const exefs = new Map();
+    const exefsDir = toc.readUInt32LE(at + 0xc);
+    if (exefsDir !== 0xffffffff) tree(exefsDir, '/', exefs);
+    return { id: toc.readBigUInt64LE(at).toString(16).padStart(16, '0'), version: toc.readUInt32LE(at + 0x14), kind: toc[at + 0x18], tags, romfs, exefs };
   });
 }
 
@@ -252,6 +255,32 @@ test('non-edition games fall back to normal base/update packing', async (t) => {
   assert.equal(packages.length, 2);
   assert.equal(packages[0].id, baseId);
   assert.equal(packages[0].tags.get(5).toString(), data.control.name);
+});
+
+test('composed card views pack as one base at the patch version with unchanged executable bytes', async (t) => {
+  const data = fixture();
+  const nativeId = '040094b02455c000';
+  data.files.get('/updates/720896/exefs/main.npdm').writeBigUInt64LE(BigInt('0x' + nativeId), 0x10);
+  data.views = data.views.filter((view) => view.path.startsWith('/updates/'));
+  for (const view of data.views) {
+    const oldPath = view.path + (view.path.endsWith('/romfs') ? '.img' : '');
+    view.path = view.path.replace('/updates/720896', '/base');
+    view.source = { ...view.source, version: 65536, selection: 'update', contentTitle: '040094b02455c800' };
+    if (view.path.endsWith('/romfs')) data.files.set(view.path + '.img', data.files.get(oldPath));
+    else for (const entry of view.entries) data.files.set(view.path + entry.path, data.files.get(oldPath + entry.path));
+  }
+  const server = await ftpServer(t, data.files);
+  const output = path.join(await directory(t), 'card.nup');
+  await packNup({ ...server, ...data, title: nativeId, output });
+  const packages = readArchive(await fs.readFile(output));
+  assert.equal(packages.length, 1);
+  assert.equal(packages[0].kind, 0);
+  assert.equal(packages[0].id, nativeId);
+  assert.equal(packages[0].version, 65536);
+  assert.deepEqual(packages[0].exefs.get('/main'), data.files.get('/base/exefs/main'));
+  assert.deepEqual(packages[0].exefs.get('/main.npdm'), data.files.get('/base/exefs/main.npdm'));
+  assert.equal(packages[0].romfs.get('/shared.txt').toString(), 'updated');
+  assert.ok(server.requests.every((name) => name.startsWith('/base/')));
 });
 
 test('failed FTP setup leaves no output or temporary directory', async (t) => {

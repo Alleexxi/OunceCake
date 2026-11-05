@@ -1,9 +1,10 @@
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
-const { success, pathRequest, idBytes, resultError, cleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
+const { success, pathRequest, idBytes, resultError, cleanup, withCleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
 const { discoverUpdates, discoverDlc, discoverDataPatches, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl } = require('./content.cjs');
 const { createProgramMounts, prepareInstalledLicense } = require('./program.cjs');
 const { matchingDlc, verifyDlcSnapshot } = require('./dlc.cjs');
+const { prepareBaseProgram } = require('./base-program.cjs');
 
 // ncm mounts + metadata used for getting the ftp server ready
 
@@ -219,6 +220,9 @@ async function readRomfs(read, storageSize) {
   }
 
   const header = await exact(0, 0x50);
+  if (header.length === 0x50 && header.every((byte) => byte === 0)) {
+    throw Object.assign(new Error('Invalid RomFS: zero-filled header'), { code: 'GAME_ROMFS_ZERO_HEADER' });
+  }
   const h = Array.from({ length: 10 }, (_, i) => integer(header.readBigUInt64LE(i * 8)));
   checkRomfs(h[0] === 0x50, 'header size');
 
@@ -589,6 +593,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
             }, mounted.size)
           : await filesystemEntries(mounted);
     } catch (error) {
+      error.source = mounted.source;
       await cleanup([() => files.close(mounted)], error);
     }
     const mount = sources.length;
@@ -612,7 +617,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
       size: mounted.size || 0,
       source: mounted.source,
     });
-    return mounted;
+    return { ...mounted, entries };
   }
 
   function groups(records) {
@@ -636,26 +641,6 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
 
   const dlc = await discoverDlc({ ...a, title });
   const installed = [4, 5, 2].map((storage) => ({ storage }));
-  const base = await mountView('/base', 'romfs', installed, true);
-  await mountView(
-    '/base',
-    'exefs',
-    installed.filter((candidate) => candidate.storage === base.source.storage),
-  );
-
-  // the control content (NACP + icon) is what names the title and lets a loader register it; the FTP
-  // server doesn't serve it, so for a .nup we read it here and carry it into the meta
-  let control = null;
-  if (images) {
-    cancelled();
-    try {
-      control = await readControl(a, title, [base.source.storage, 4, 5, 2]);
-      if (control) console.log('Control: ' + (control.name || '(no name)') + (control.icon ? ', icon ' + control.icon.length + ' bytes' : ', no icon'));
-      else console.log('Control: none found (the nup will have no name or icon)');
-    } catch (error) {
-      console.log('Could not read control content: ' + error.message);
-    }
-  }
 
   // only the newest version of each update title is kept: older ones are fully superseded and just bloat
   // the dump (and the stale game-card update is the one that tends to stall). YOINK_ALL_UPDATE_VERSIONS=1
@@ -681,7 +666,30 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
     return !skipped.has(version) && !stale;
   });
 
+  const { base, composedUpdate } = await prepareBaseProgram({
+    mountView, installed, updateGroups,
+    readCodeHeader: async (mount, filename, length) => {
+      cancelled();
+      const opened = success(await a.filesystem.openFile(a.s, mount.handle, filename), 'Read composed program header');
+      return withCleanup(() => a.filesystem.readFile(a.s, opened.handle, 0, length), () => a.s.close(opened.handle));
+    },
+  });
+
+  // the control content (NACP + icon) names the title and lets a loader register it
+  let control = null;
+  if (images) {
+    cancelled();
+    try {
+      control = await readControl(a, title, [base.source.storage, 4, 5, 2]);
+      if (control) console.log('Control: ' + (control.name || '(no name)') + (control.icon ? ', icon ' + control.icon.length + ' bytes' : ', no icon'));
+      else console.log('Control: none found (the nup will have no name or icon)');
+    } catch (error) {
+      console.log('Could not read control content: ' + error.message);
+    }
+  }
+
   for (const group of updateGroups) {
+    if (composedUpdate && group[0].contentTitle === composedUpdate.contentTitle && group[0].version === composedUpdate.version) continue;
     const prefix = '/updates/' + group[0].version;
 
     const candidates = group.map((item) => ({

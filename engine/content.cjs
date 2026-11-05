@@ -229,14 +229,17 @@ async function resolveContent({ s, root, domain, service, title, storage, update
       'GetLatestContentMetaKey',
     );
     const key = Buffer.from(latest.data.subarray(0, 16));
+    if (update && key.readUInt32LE(8) !== update.version) {
+      throw new Error('Selected update version changed; restart the dump');
+    }
 
     if (dlc || update) {
       const owner = success(
         await s.ipc('Verify selected ' + (dlc ? 'DLC' : 'update') + ' application', database, 22, key),
         'GetOwnerApplicationId',
       );
-      if (dlc && owner.data.readBigUInt64LE() !== BigInt('0x' + title)) {
-        throw new Error('Selected DLC belongs to another application');
+      if (owner.data.readBigUInt64LE() !== BigInt('0x' + title)) {
+        throw new Error('Selected ' + (dlc ? 'DLC' : 'update') + ' belongs to another application');
       }
     }
 
