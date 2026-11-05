@@ -537,7 +537,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
     try {
       return await mountViewTimed(prefix, section, candidates, allowAbsent);
     } finally {
-      if (process.env.OZ_TRACE) console.log('  [trace] ' + prefix + '/' + section + ' took ' + ((Date.now() - started) / 1000).toFixed(1) + ' s');
+      if (process.env.YOINK_TRACE || process.env.OZ_TRACE) console.log('  [trace] ' + prefix + '/' + section + ' took ' + ((Date.now() - started) / 1000).toFixed(1) + ' s');
     }
   }
 
@@ -655,8 +655,8 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
   }
 
   // only the newest version of each update title is kept: older ones are fully superseded and just bloat
-  // the dump (and the stale game-card update is the one that tends to stall). OZ_ALL_UPDATE_VERSIONS=1
-  // packs every version; OZ_SKIP_UPDATES=65536,131072 still drops specific versions by hand
+  // the dump (and the stale game-card update is the one that tends to stall). YOINK_ALL_UPDATE_VERSIONS=1
+  // packs every version; YOINK_SKIP_UPDATES=65536,131072 still drops specific versions by hand
   const allUpdates = [...groups(updates)];
   const newestVersion = new Map();
   for (const group of allUpdates) {
@@ -664,8 +664,8 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
     newestVersion.set(contentTitle, Math.max(newestVersion.get(contentTitle) ?? -1, version));
   }
 
-  const skipped = new Set((process.env.OZ_SKIP_UPDATES || '').split(',').filter(Boolean).map(Number));
-  const keepAll = Boolean(process.env.OZ_ALL_UPDATE_VERSIONS);
+  const skipped = new Set((process.env.YOINK_SKIP_UPDATES ?? process.env.OZ_SKIP_UPDATES ?? '').split(',').filter(Boolean).map(Number));
+  const keepAll = Boolean(process.env.YOINK_ALL_UPDATE_VERSIONS || process.env.OZ_ALL_UPDATE_VERSIONS);
   const updateGroups = allUpdates.filter((group) => {
     const { contentTitle, version, storage } = group[0];
     const stale = !keepAll && version !== newestVersion.get(contentTitle);
@@ -705,8 +705,8 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
 
   // add-on data patches (content meta 0x84) carry newer data for an add-on, e.g. a Switch 2 Upgrade Pack
   // built for the current program. Served next to their add-on at /dlc/<data patch id>/<ver>/romfs; one
-  // that FS won't open as a complete RomFS is logged and skipped. OZ_NO_DATA_PATCHES=1 skips them all
-  const dataPatches = process.env.OZ_NO_DATA_PATCHES ? [] : await discoverDataPatches({ ...a, title });
+  // that FS won't open as a complete RomFS is logged and skipped. YOINK_NO_DATA_PATCHES=1 skips them all
+  const dataPatches = (process.env.YOINK_NO_DATA_PATCHES || process.env.OZ_NO_DATA_PATCHES) ? [] : await discoverDataPatches({ ...a, title });
   for (const patch of dataPatches) {
     const prefix = '/dlc/' + patch.contentTitle + '/' + patch.version;
     try {
@@ -721,9 +721,9 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
   }
 
   // Switch 2 Edition program (id_offset 1) of every update, served at /switch2/updates/<ver>/romfs.
-  // Games without one just log a line; OZ_NO_SWITCH2=1 skips the attempt
+  // Games without one just log a line; YOINK_NO_SWITCH2=1 skips the attempt
   let editionControlVersion = -1;
-  for (const group of process.env.OZ_NO_SWITCH2 ? [] : updateGroups) {
+  for (const group of (process.env.YOINK_NO_SWITCH2 || process.env.OZ_NO_SWITCH2) ? [] : updateGroups) {
     const prefix = '/switch2/updates/' + group[0].version;
     const candidates = group.map((item) => ({
       storage: item.storage,

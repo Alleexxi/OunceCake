@@ -352,7 +352,7 @@ async function deployFtp({ attachment: a, image, index, sources, port }) {
       if (current.state === 3) {
         throw new Error(
           'Native FTP startup failed: 0x' + current.result.toString(16) +
-            '\nIs port ' + port + ' still taken? An earlier OunceCake server that wasn\'t stopped with Ctrl-C ' +
+            '\nIs port ' + port + ' still taken? An earlier Yoink server that wasn\'t stopped with Ctrl-C ' +
             'keeps running until the game is closed. Try another --port.',
         );
       }

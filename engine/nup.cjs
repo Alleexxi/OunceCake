@@ -540,7 +540,7 @@ function buildMeta(pack, { npdm, mainHead, name, control }) {
     if (magic === 'NSO0' || nro === 'NRO0') records.push(tlv(0x0007, mainHead.subarray(0x40, 0x60)));
   }
 
-  records.push(tlv(0x0008, Buffer.from('OunceCake')));
+  records.push(tlv(0x0008, Buffer.from('Yoink')));
   return Buffer.concat(records);
 }
 
@@ -688,7 +688,7 @@ function encodeSuperblock(packages, { toc, blobOffset, fileSize }) {
 
 const mb = (bytes) => (bytes / 1048576).toFixed(1);
 
-function progress(label, total) {
+function progress(label, total, onProgress) {
   const started = Date.now();
   let done = 0;
   let shown = 0;
@@ -702,10 +702,16 @@ function progress(label, total) {
     const seconds = Math.max((now - started) / 1000, 0.001);
     if (now - window.at >= 3000) window = { at: now, done, rate: ((done - window.done) * 1000) / (now - window.at) };
     const rate = final || !window.rate ? '' : amount(window.rate) + ' ' + unit + '/s now, ';
+    if (onProgress) {
+      onProgress({ path: label, done, total, bytesPerSecond: window.rate || done / seconds, finished: final });
+      return;
+    }
     const line = '  ' + label + '  ' + amount(done) + '/' + amount(total) + ' ' + unit + '  ' + rate + amount(done / seconds) + ' ' + unit + '/s avg';
     if (tty) process.stdout.write('\r' + line + '\x1b[K' + (final ? '\n' : ''));
     else if (final) console.log(line);
   };
+
+  if (onProgress) show(false);
 
   return {
     add(bytes) {
@@ -780,8 +786,8 @@ function makeImageConsumer(romfs, blob, spillDir) {
 }
 
 // retrieve one image once and fan every chunk out to each output file that wants it
-async function pullImage(client, ftpPath, size, consumers, shouldStop) {
-  const meter = progress(ftpPath, size);
+async function pullImage(client, ftpPath, size, consumers, shouldStop, onProgress) {
+  const meter = progress(ftpPath, size, onProgress);
   let position = 0;
 
   for (const consumer of consumers) await consumer.begin();
@@ -815,7 +821,7 @@ function editionOutputs(output, edition) {
   ];
 }
 
-async function packNup({ host, port, views, title, name, output, edition = 'switch2', control = null, shouldStop = () => false }) {
+async function packNup({ host, port, views, title, name, output, edition = 'switch2', control = null, shouldStop = () => false, onProgress }) {
   const targets = editionOutputs(output, edition).map((target) => {
     const packages = planPackages(views, title, target.edition);
     const plan = layout(packages);
@@ -835,7 +841,7 @@ async function packNup({ host, port, views, title, name, output, edition = 'swit
     if (shouldStop()) throw Object.assign(new Error('Cancelled'), { code: 'FTP_CANCELLED' });
   };
 
-  const spillDir = await fsp.mkdtemp(path.join(path.dirname(output), '.ouncecake-'));
+  const spillDir = await fsp.mkdtemp(path.join(path.dirname(output), '.yoink-'));
   let client;
   try {
     stop();
@@ -864,11 +870,15 @@ async function packNup({ host, port, views, title, name, output, edition = 'swit
 
       const contents = job.consumers.map(() => new Content(job.size, spillDir));
       const head = [];
+      const meter = onProgress ? progress(job.ftpPath, job.size, onProgress) : null;
       await client.retrieve(job.ftpPath, job.size, async (chunk) => {
+        stop();
         if (job.path === '/main.npdm') head.push(chunk);
         else if (job.path === '/main' && Buffer.concat(head).length < 0x60) head.push(chunk);
         for (const content of contents) await content.add(chunk);
+        meter?.add(chunk.length);
       });
+      meter?.end();
 
       const full = Buffer.concat(head);
       for (let i = 0; i < job.consumers.length; i++) {
@@ -921,7 +931,7 @@ async function packNup({ host, port, views, title, name, output, edition = 'swit
       }
 
     for (const job of imageJobs.values()) {
-      await pullImage(client, job.ftpPath, job.size, job.consumers, shouldStop);
+      await pullImage(client, job.ftpPath, job.size, job.consumers, shouldStop, onProgress);
     }
 
     for (const target of targets) {

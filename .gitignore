@@ -9,3 +9,4 @@ connection.json
 *.audit.json
 *.bytecheck.txt
 .ouncecake-*/
+.yoink-*/

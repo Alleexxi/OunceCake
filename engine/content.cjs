@@ -510,6 +510,42 @@ async function controlName(context, game) {
   return control?.name || null;
 }
 
+// Check installed Program[1] by its NCA identity, without mounting any game filesystems.
+// A second program alone is not enough: ordinary Switch games can also be multi-program.
+async function hasSwitch2Edition(context, game, updates) {
+  if (!game.title.startsWith('01')) return false;
+
+  const { s, root, domain, shouldStop = () => false } = context;
+  const patchTitle = (BigInt('0x' + game.title) + 0x800n).toString(16).padStart(16, '0');
+  const candidates = updates
+    .filter((update) => update.contentTitle === patchTitle)
+    .map((update) => ({ storage: update.storage, update }));
+  candidates.push(...game.storages.map((storage) => ({ storage })));
+
+  for (const candidate of candidates) {
+    throwIfCancelled(shouldStop);
+    let source;
+    try {
+      source = await resolveProgramContent({ ...context, title: game.title, ...candidate, programIndex: 1 });
+    } catch (error) {
+      // ContentNotFound / ContentMetaNotFound, or an unavailable removable storage.
+      if ([0xa05, 0xe05, ...inactive].includes(error.nativeResult?.canonical)) continue;
+      throw error;
+    }
+
+    const filename = Buffer.alloc(0x301);
+    filename.write(source.contentPath);
+    await s.write(s.base + 0x2000, filename);
+    const identity = success(await domain.send(
+      s, 'Check installed Switch 2 Edition', root,
+      pathRequest(618, Buffer.from([source.attributes]), s.base + 0x2000),
+    ), 'Check installed Switch 2 Edition');
+    const programId = identity.data.readBigUInt64LE().toString(16).padStart(16, '0');
+    if (programId.startsWith('04')) return true;
+  }
+  return false;
+}
+
 async function discoverGames({ s, root, domain, service, filesystem, shouldStop = () => false }) {
   console.log("Getting games list..");
   const cancelled = () => throwIfCancelled(shouldStop);
@@ -577,7 +613,13 @@ async function discoverGames({ s, root, domain, service, filesystem, shouldStop 
   }, () => closeHandles(s, control ? [control] : []));
 
   const games = [...byTitle.values()];
+  cancelled();
+  const updates = games.some((game) => game.title.startsWith('01'))
+    ? await discoverUpdates({ s, domain, service, title: '0000000000000000' })
+    : [];
   for (const game of games) {
+    cancelled();
+    game.switch2Edition = await hasSwitch2Edition({ s, root, domain, service, shouldStop }, game, updates);
     if (!game.name) {
       cancelled();
       game.name = await controlName({ s, root, domain, service, filesystem }, game);

@@ -1,6 +1,4 @@
-# OunceCake
-
-(`ozdumptool` if you're ***lame*** and ***boring***) 
+# Yoink
 
 Tool to dump unencrypted romFS and exeFS for Switch 2 games, updates and DLC.
 
@@ -13,37 +11,45 @@ For the love of God, do NOT share any files you rip using this tool. It is to be
 
 ## Usage
 
-0. Take note of your Switch 2's local IP address. It can be found in the network settings.
+0. Connect your computer and Switch 2 to the same local network. Yoink reads the console's IP address through RPC automatically.
 
 1. Clone the repo: 
 ``` 
-git clone https://github.com/Alleexxi/OunceCake.git
+git clone https://github.com/Alleexxi/OunceCake.git Yoink
 ```
 
 2. Use kurumuz's fork of the [ns2jb exploit](https://gitlab.com/kurumuz/ns2jb) to get an RPC connection with the system. Use `node run.cjs --rpc`.
 
-3. Run `node ouncecake.cjs <path-to-ns2jb-run>`. The output from ns2jb will tell you where this path is. (`Run folder: /home/hexa/projects/ns2jb2/runs/switch2-Icu7Jd`)
+3. Run `node yoink.cjs <path-to-ns2jb-run>`. The output from ns2jb will tell you where this path is. (`Run folder: /home/hexa/projects/ns2jb2/runs/switch2-Icu7Jd`)
 
-4. OunceCake will prompt you to pick a game. Pick one, then wait.
+4. Pick a game, choose Save NUP or Serve FTP, and start the dump.
 
-5. When OunceCake says `FTP up! ftp://<switch 2 ip>:2121`, use an FTP client to connect to your Switch 2's local IP address with port 2121. A username and password is not required. (Make sure your FTP client has its transfer mode set to Binary/Image/TYPE I.)
+Interactive terminals open a full-screen interface: use ↑/↓ to browse, `/` to search by name or title ID, and Enter to choose a game. The setup screen lets you save a NUP or serve FTP, edit the output filename, and choose an edition. Use ←/→ to change options and Enter on Start to begin.
+
+During a dump, Yoink shows the current file's progress, transfer speed, ETA, and activity log. PgUp/PgDn scroll the log; `q` or Ctrl+C stops safely and cleans up the console. After completion, press Enter to close. `--no-tui` keeps the numbered menu and ordinary output; piped output and `--probe` use this mode automatically.
+
+5. When Yoink says `FTP up!`, open the FTP address it prints in an FTP client. A username and password is not required. (Make sure your FTP client has its transfer mode set to Binary/Image/TYPE I.)
 
 ### Dumping straight to a .nup
 
-Instead of browsing the FTP yourself, OunceCake can download everything (base, updates and DLC) and pack it into a single `.nup` file:
+Instead of browsing the FTP yourself, Yoink can download everything (base, updates and DLC) and pack it into a single `.nup` file:
 
 ```
-node ouncecake.cjs <path-to-ns2jb-run> --nup game.nup --ip <switch 2 ip>
+node yoink.cjs <path-to-ns2jb-run> --nup game.nup
 ```
+
+The console's IP is detected automatically from the active RPC connection. You can still pass `--ip <switch 2 ip>` to override it, or if automatic detection fails.
 
 Each RomFS is pulled as one big image instead of thousands of small files, reducing per-file FTP overhead. Transfer speed still depends on the console's storage and network. Files are hashed, deduplicated across base/updates and zstd compressed on the PC as they come in. Needs Node 22.15 or newer (for zstd).
 
 #### Switch 2 Editions
 
+The game selection list marks `[Switch 2 Edition]` when an installed base or update contains a Switch 2 program at program index 1. This checks installed content, not whether an upgrade is available online or its Upgrade Pack is owned.
+
 A Switch 2 Edition ships a second program (program index 1) inside its update, along with an Upgrade Pack DLC and the updated program 0 RomFS. `--edition` chooses how the `.nup` is packed:
 
 ```
-node ouncecake.cjs <path-to-ns2jb-run> --nup game.nup --ip <switch 2 ip> --edition switch2
+node yoink.cjs <path-to-ns2jb-run> --nup game.nup --edition switch2
 ```
 
 - `switch2` (the default) packs a self-contained Switch 2 Edition base package with the Switch 2 `0400...` title ID, program 1 ExeFS, and a flattened RomFS combining updated program 0 + Switch 2 Upgrade Pack DLC + program 1 (skipping the unused v1.0.0 base RomFS and dummy unlock DLCs).
@@ -61,12 +67,12 @@ base game's Control data. With `all`, the edition metadata is carried on its pro
 
 An add-on can be updated by a data patch (content meta type `0x84`, id = add-on id ^ `0x800`). Upgrade Packs use this: Tears of the Kingdom's Upgrade Pack `0100F2C0115B7001` v0 was built for an older Switch 2 program, and data patch `0100F2C0115B7801` brings it in line with the current one. Without it the Switch 2 program can't find its resource tables and crashes at boot.
 
-Data patches are served next to their add-on at `/dlc/<data patch id>/<version>/romfs`. `--edition switch2` layers them over the Upgrade Pack; the other editions pack them as an `addon_update` package (NUP kind 3) under the id of the add-on they update. `OZ_NO_DATA_PATCHES=1` leaves them out.
+Data patches are served next to their add-on at `/dlc/<data patch id>/<version>/romfs`. `--edition switch2` layers them over the Upgrade Pack; the other editions pack them as an `addon_update` package (NUP kind 3) under the id of the add-on they update. `YOINK_NO_DATA_PATCHES=1` leaves them out.
 
 To see what a title has installed, and whether its data patches open:
 
 ```
-node ouncecake.cjs <path-to-ns2jb-run> <title id> --probe
+node yoink.cjs <path-to-ns2jb-run> <title id> --probe
 ```
 
 ## Development
@@ -77,6 +83,6 @@ AArch64 GNU toolchain or Clang, LLD and llvm-objcopy on PATH.
 
 ## Licensing
 
-OunceCake is licensed under the terms of the GPLv2 (because it borrows a tiny bit of code from [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere))
+Yoink is licensed under the terms of the GPLv2 (because it borrows a tiny bit of code from [Atmosphere](https://github.com/Atmosphere-NX/Atmosphere))
 
 You can find a copy of the license in the LICENSE file.

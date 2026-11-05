@@ -101,8 +101,8 @@ async function openServiceWithFallback({ s, sm, name }) {
   }
 }
 
-// OZ_TRACE=1 logs every console call and how long it took, to find what's slow
-const tracing = Boolean(process.env.OZ_TRACE);
+// YOINK_TRACE=1 logs every console call and how long it took, to find what's slow
+const tracing = Boolean(process.env.YOINK_TRACE || process.env.OZ_TRACE);
 
 function traceMethod(target, name, describe) {
   if (!tracing || target[name].traced) return;

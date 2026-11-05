@@ -180,7 +180,7 @@ function readArchive(bytes) {
 }
 
 async function directory(t) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ouncecake-test-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'yoink-test-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   return dir;
 }
@@ -189,7 +189,8 @@ test('both editions retain their own metadata and flatten only the Switch 2 outp
   const data = fixture();
   const server = await ftpServer(t, data.files);
   const output = path.join(await directory(t), 'game.nup');
-  await packNup({ ...server, ...data, title: baseId, output, edition: 'both' });
+  const progress = [];
+  await packNup({ ...server, ...data, title: baseId, output, edition: 'both', onProgress: (event) => progress.push(event) });
   const s1 = readArchive(await fs.readFile(output));
   const s2 = readArchive(await fs.readFile(output.replace('.nup', '-switch2.nup')));
   assert.equal(s1[0].tags.get(5).toString(), data.control.name);
@@ -207,6 +208,9 @@ test('both editions retain their own metadata and flatten only the Switch 2 outp
   assert.ok(!program.romfs.has('/aoc/bonus.txt'));
   assert.ok(s2.some((pack) => pack.id === '0100abcd00011002'));
   assert.equal(new Set(server.requests).size, server.requests.length, 'shared input transfers must happen once');
+  const finished = progress.filter((event) => event.finished);
+  assert.deepEqual(finished.map((event) => event.path).sort(), [...server.requests].sort());
+  assert.ok(finished.every((event) => event.done === event.total && Number.isFinite(event.bytesPerSecond)));
 });
 
 test('all mode retains base, both programs and the add-on data patch identity', async (t) => {
