@@ -20,13 +20,17 @@ git clone https://github.com/Alleexxi/Yoink.git
 
 2. Use kurumuz's fork of the [ns2jb exploit](https://gitlab.com/kurumuz/ns2jb) to get an RPC connection with the system. Use `node run.cjs --rpc`.
 
-3. Run `node yoink.cjs <path-to-ns2jb-run>`. The output from ns2jb will tell you where this path is. (`Run folder: /home/hexa/projects/ns2jb2/runs/switch2-Icu7Jd`)
+3. Run `node yoink.cjs` (or `npm start`). On the first launch, enter the run folder printed by ns2jb, for example `/home/hexa/projects/ns2jb2/runs/switch2-Icu7Jd`. You can also enter its parent `runs` folder.
 
 4. Pick a game, choose Save NUP or Serve FTP, and start the dump.
 
 Interactive terminals open a full-screen interface: use ↑/↓ to browse, `/` to search by name or title ID, and Enter to choose a game. The setup screen lets you save a NUP or serve FTP, edit the output filename, and choose an edition. Use ←/→ to change options and Enter on Start to begin.
 
 During a dump, Yoink shows the current file's progress, transfer speed, ETA, and activity log. PgUp/PgDn scroll the log; `q` or Ctrl+C stops safely and cleans up the console. After completion, press Enter to close. `--no-tui` keeps the numbered menu and ordinary output; piped output and `--probe` use this mode automatically.
+
+Yoink remembers the parent `runs` folder after a successful connection. Later launches check its run folders from newest to oldest and choose the first one with a ready application RPC bridge and a matching filesystem RPC session. Stale or incomplete runs are skipped; if none is live, Yoink asks for a path again. Start ns2jb with `--rpc` before launching Yoink.
+
+You can still provide an explicit run or parent folder with `node yoink.cjs <path>`. Settings live in `%APPDATA%/Yoink/settings.json` on Windows or `$XDG_CONFIG_HOME/yoink/settings.json` (default `~/.config/yoink/settings.json`) elsewhere. `YOINK_CONFIG` overrides the settings file. Non-interactive launches need a saved live run or an explicit path.
 
 5. When Yoink says `FTP up!`, open the FTP address it prints in an FTP client. A username and password is not required. (Make sure your FTP client has its transfer mode set to Binary/Image/TYPE I.)
 
@@ -35,7 +39,7 @@ During a dump, Yoink shows the current file's progress, transfer speed, ETA, and
 Instead of browsing the FTP yourself, Yoink can download everything (base, updates and DLC) and pack it into a single `.nup` file:
 
 ```
-node yoink.cjs <path-to-ns2jb-run> --nup game.nup
+node yoink.cjs --nup game.nup
 ```
 
 The console's IP is detected automatically from the active RPC connection. You can still pass `--ip <switch 2 ip>` to override it, or if automatic detection fails.
@@ -49,7 +53,7 @@ The game selection list marks `[Switch 2 Edition]` when an installed base or upd
 A Switch 2 Edition ships a second program (program index 1) inside its update, along with an Upgrade Pack DLC and the updated program 0 RomFS. `--edition` chooses how the `.nup` is packed:
 
 ```
-node yoink.cjs <path-to-ns2jb-run> --nup game.nup --edition switch2
+node yoink.cjs --nup game.nup --edition switch2
 ```
 
 - `switch2` (the default) packs a self-contained Switch 2 Edition base package with the Switch 2 `0400...` title ID, program 1 ExeFS, and a flattened RomFS combining updated program 0 + Switch 2 Upgrade Pack DLC + program 1 (skipping the unused v1.0.0 base RomFS and dummy unlock DLCs).

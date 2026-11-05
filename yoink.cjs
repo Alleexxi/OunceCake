@@ -10,9 +10,10 @@ const { deployFtp, readImage } = require('./engine/ftp.cjs');
 const { packNup } = require('./engine/nup.cjs');
 const { getConsoleIp } = require('./engine/network.cjs');
 const { TerminalUI, supportsTui } = require('./engine/tui.cjs');
+const { resolveRun } = require('./engine/runtime.cjs');
 
-const USAGE = 'Usage: node yoink.cjs <run-directory> [title-id] [--port 2121] [--nup <out.nup>] [--ip <switch 2 ip>] [--edition switch2]\n' +
-              'Use the run dir given by ns2jb (Run folder: <whatever>)\n' +
+const USAGE = 'Usage: node yoink.cjs [run-directory|runs-directory] [title-id] [--port 2121] [--nup <out.nup>] [--ip <switch 2 ip>] [--edition switch2]\n' +
+              'Enter an ns2jb run path once; Yoink remembers its parent and finds a live run next time\n' +
               'You can also provide a title ID to skip the selection menu and just mount a specific game\n' +
               'With --nup, Yoink downloads everything itself and writes a .nup instead of leaving the FTP up\n' +
               'The console IP is detected through RPC; --ip overrides it for --nup downloads\n' +
@@ -82,20 +83,18 @@ function getArgs(argv) {
     args.push(a);
   }
 
-  if (args.length < 1 || args.length > 2) {
+  if (args.length > 2) {
     throw new Error(USAGE);
-  }
-
-  if (args.length === 1 && /^(?:0x)?[0-9a-fA-F]{16}$/.test(args[0])) {
-    throw new Error('You need to add a run directory\n' + USAGE);
   }
 
   if (ip && !nup) {
     throw new Error('--ip is used with --nup\n' + USAGE);
   }
 
-  const title = args.length === 2 ? titleId(args[1]) : undefined;
-  return { run: path.resolve(args[0]), title, port, nup: nup && path.resolve(nup), ip, edition, probe, noTui };
+  const [runArg, titleArg] = args.length === 1 && /^(?:0x)?[0-9a-fA-F]{16}$/.test(args[0])
+    ? [undefined, args[0]] : args;
+  const title = titleArg ? titleId(titleArg) : undefined;
+  return { run: runArg ? path.resolve(runArg) : undefined, title, port, nup: nup && path.resolve(nup), ip, edition, probe, noTui };
 }
 
 const storageNames = { 2: 'Game card', 4: 'Internal', 5: 'SD' };
@@ -160,6 +159,24 @@ async function pickGame(games, signal) {
   }
 }
 
+async function promptRunPath({ reason, parent }, signal) {
+  console.log(reason);
+  if (parent) console.log('Saved runs folder: ' + parent);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const close = () => rl.close();
+  signal.addEventListener('abort', close, { once: true });
+  rl.once('SIGINT', close);
+  try {
+    if (signal.aborted) return null;
+    process.stdout.write('ns2jb run or runs folder (q to quit): ');
+    for await (const line of rl) return /^q(?:uit)?$/i.test(line.trim()) ? null : line;
+    return null;
+  } finally {
+    signal.removeEventListener('abort', close);
+    rl.close();
+  }
+}
+
 async function main(argv = process.argv.slice(2)) {
   const options = getArgs(argv);
   if (options.help) {
@@ -167,8 +184,8 @@ async function main(argv = process.argv.slice(2)) {
     return;
   }
   const image = await readImage();
-  const { port, run, ip, probe } = options;
-  let { nup, edition } = options;
+  const { port, ip, probe } = options;
+  let { run, nup, edition } = options;
   let { title } = options;
   let name;
   const cancellation = new AbortController();
@@ -198,6 +215,14 @@ async function main(argv = process.argv.slice(2)) {
   try {
     ui?.start();
     await withCleanup(async () => {
+      run = await resolveRun({ provided: run, signal: cancellation.signal,
+        prompt: ui ? (details) => ui.requestRunPath(details)
+          : process.stdin.isTTY ? (details) => promptRunPath(details, cancellation.signal) : undefined,
+        onStatus: (status) => { ui?.setStage(status); console.log(status); },
+      });
+      if (!run || cancellation.signal.aborted) return;
+      console.log('Using RPC run: ' + run);
+      ui?.setStage('Connecting to your console');
       attachment = await attachGame(run);
       const shouldStop = () => cancellation.signal.aborted;
       let selectedGame;

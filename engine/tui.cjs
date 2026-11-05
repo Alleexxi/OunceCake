@@ -121,6 +121,13 @@ class TerminalUI {
     return this.wait();
   }
 
+  requestRunPath({ reason, parent }) {
+    this.mode = 'runtime';
+    this.runPath = parent || '';
+    this.runReason = reason;
+    return this.wait();
+  }
+
   configure({ game, output, edition }) {
     this.game = game;
     this.outputFile = output || defaultOutput(game);
@@ -147,7 +154,13 @@ class TerminalUI {
   key(text, key) {
     if (key.ctrl && key.name === 'c') { this.onCancel(); return; }
     if (this.signal.aborted) return;
-    if (this.mode === 'games') {
+    if (this.mode === 'runtime') {
+      if (key.name === 'escape') { this.resolve(null); return; }
+      if (key.name === 'return') { this.resolve(this.runPath); return; }
+      if (key.ctrl && key.name === 'u') this.runPath = '';
+      else if (key.name === 'backspace') this.runPath = [...this.runPath].slice(0, -1).join('');
+      else if (text && !key.ctrl && !key.meta && !/[\x00-\x1f\x7f]/.test(text)) this.runPath += text;
+    } else if (this.mode === 'games') {
       if (this.searching) {
         if (key.name === 'escape') { this.searching = false; this.query = ''; }
         else if (key.name === 'return') this.searching = false;
@@ -219,7 +232,19 @@ class TerminalUI {
       this.output.write('\x1b[H' + rows.slice(0, height).join('\r\n') + '\x1b[J');
       return;
     }
-    if (this.mode === 'games') {
+    if (this.mode === 'runtime') {
+      add(' CONNECT TO NS2JB', '1');
+      add();
+      add(' Enter the run folder, or its parent runs folder.');
+      add(' Yoink will remember the parent and find a live run next time.', '90');
+      add();
+      add(' Path  ' + this.runPath + '▏', '30;46');
+      add();
+      // Split long validation errors so the useful part remains visible on small terminals.
+      const message = clean(this.runReason);
+      for (let at = 0; at < message.length && rows.length < height - 3; at += width - 2) add(' ' + message.slice(at, at + width - 2), '33');
+      footer = ' Type or paste path  ·  Ctrl+U clear  ·  Enter connect  ·  Esc quit';
+    } else if (this.mode === 'games') {
       const games = this.filtered();
       add(' LIBRARY  /  ' + games.length + ' of ' + this.games.length + ' games');
       add(' Search: ' + (this.query || (this.searching ? '' : 'press / to filter')) + (this.searching ? '▏' : ''), this.searching ? '36' : '90');

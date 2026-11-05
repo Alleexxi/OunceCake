@@ -125,3 +125,16 @@ test('completion and error screens remain readable until dismissed', async (t) =
   key('q', 'q');
   assert.equal(await failure, true);
 });
+
+test('first-run screen accepts a pasted path and can be cancelled', async (t) => {
+  const { ui, key, screen } = terminal(t);
+  const prompt = ui.requestRunPath({ reason: 'No live RPC run was found.', parent: '/old/runs' });
+  assert.match(stripVTControlCharacters(screen()), /CONNECT TO NS2JB/);
+  key('u', undefined, { ctrl: true });
+  key('text', '/new/runs/switch2-current');
+  key('return');
+  assert.equal(await prompt, '/new/runs/switch2-current');
+  const retry = ui.requestRunPath({ reason: 'Try again.', parent: '' });
+  key('escape');
+  assert.equal(await retry, null);
+});
