@@ -69,9 +69,11 @@ base game's Control data. With `all`, the edition metadata is carried on its pro
 
 #### Add-on data patches
 
-An add-on can be updated by a data patch (content meta type `0x84`, id = add-on id ^ `0x800`). Upgrade Packs use this: Tears of the Kingdom's Upgrade Pack `0100F2C0115B7001` v0 was built for an older Switch 2 program, and data patch `0100F2C0115B7801` brings it in line with the current one. Without it the Switch 2 program can't find its resource tables and crashes at boot.
+An add-on can be updated by a data patch (content meta type `0x84`). Yoink reads its original add-on ID and application owner from content metadata, checks the add-on's matching patch reference when present, and pins the selected DLC version and content. Upgrade Packs use this: Tears of the Kingdom's Upgrade Pack `0100F2C0115B7001` v0 was built for an older Switch 2 program, and data patch `0100F2C0115B7801` brings it in line with the current one. Without it the Switch 2 program can't find its resource tables and crashes at boot.
 
 Data patches are served next to their add-on at `/dlc/<data patch id>/<version>/romfs`. `--edition switch2` layers them over the Upgrade Pack; the other editions pack them as an `addon_update` package (NUP kind 3) under the id of the add-on they update. `YOINK_NO_DATA_PATCHES=1` leaves them out.
+
+DLC metadata discovery and patch matching are adapted from [misshexa66's upstream DLC work](https://github.com/misshexa66/OunceCake/commit/9a5e8c0b11f4c75b8553c2ee641c6225af80ec5b), retaining Yoink's NUP layout and restoration of previous single-path or two-path DLC registrations.
 
 To see what a title has installed, and whether its data patches open:
 

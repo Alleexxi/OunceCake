@@ -1,12 +1,23 @@
 const { inflateRawSync } = require('node:zlib');
+const { parseDlcMetadata } = require('./dlc.cjs');
 const { success, idBytes, fixedOutput, pathRequest, resultError, withCleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
 
 // read nca content!
 
 const inactive = new Set([0x21005, 0x20a05]);
 
+async function readContentMeta(s, database, key) {
+  const size = success(await s.ipc('Get DLC metadata size', database, 10, key), 'Get DLC metadata size').data.readUInt32LE();
+  if (size < 8 || size > s.bytes - 0x6000) throw new Error('Invalid DLC metadata size');
+  const address = s.base + 0x6000;
+  success(await s.ipc('Read DLC metadata', database, 1, key, {
+    receive: [{ address, size, mode: 0 }],
+  }), 'Read DLC metadata');
+  return s.readOwned(address, size);
+}
+
 async function discoverInstalled({ s, domain, service, title, metaType, kind }) {
-  const label = metaType === 0x80 ? 'application' : metaType === 0x82 ? 'DLC' : 'update';
+  const label = metaType === 0x80 ? 'application' : metaType === 0x82 ? 'DLC' : metaType === 0x84 ? 'DLC update' : 'update';
   const ncm = await service('ncm');
   const records = [];
 
@@ -55,7 +66,7 @@ async function discoverInstalled({ s, domain, service, title, metaType, kind }) 
             const version = key.readUInt32LE(8);
 
             if (!found.has(contentTitle) || version > found.get(contentTitle).version) {
-              found.set(contentTitle, { contentTitle, version, storage });
+              found.set(contentTitle, { contentTitle, version, storage, metaKey: Buffer.from(key) });
             }
           }
 
@@ -78,6 +89,7 @@ async function discoverInstalled({ s, domain, service, title, metaType, kind }) 
               contentTitle,
               version: latest.data.readUInt32LE(8),
               storage,
+              metaKey: Buffer.from(latest.data.subarray(0, 16)),
             });
             return;
           }
@@ -89,17 +101,11 @@ async function discoverInstalled({ s, domain, service, title, metaType, kind }) 
 
         await list(0n, 0xffffffffffffffffn);
 
-        if (metaType === 0x82) {
+        if (metaType === 0x82 || metaType === 0x84) {
           for (const item of found.values()) {
-            const key = Buffer.alloc(16);
-            idBytes(item.contentTitle).copy(key);
-            key.writeUInt32LE(item.version, 8);
-            key[12] = metaType;
-
-            const owner = success(
-              await s.ipc('Verify installed DLC application', database, 22, key),
-              'GetOwnerApplicationId',
-            );
+            const metadata = parseDlcMetadata(await readContentMeta(s, database, item.metaKey), metaType);
+            if (metadata.owner !== title) found.delete(item.contentTitle);
+            else Object.assign(item, metadata);
           }
         }
 
@@ -187,18 +193,7 @@ async function listApplicationContent({ s, domain, service, title }) {
   return out.sort((a, b) => a.id.localeCompare(b.id) || a.version - b.version || a.storage - b.storage);
 }
 
-// add-on data patches (content meta 0x84): an update for an add-on, id = add-on id ^ 0x800
-async function discoverDataPatches(options) {
-  const latest = new Map();
-  for (const item of await listApplicationContent(options)) {
-    if (item.type !== 0x84) continue;
-    const known = latest.get(item.id);
-    if (!known || item.version > known.version) {
-      latest.set(item.id, { contentTitle: item.id, version: item.version, storage: item.storage });
-    }
-  }
-  return [...latest.values()];
-}
+const discoverDataPatches = (options) => discoverInstalled({ ...options, metaType: 0x84, kind: 'DLC updates' });
 
 const discoverUpdates = (options) => discoverInstalled({ ...options, metaType: 0x81, kind: 'updates' });
 const discoverDlc = (options) => discoverInstalled({ ...options, metaType: 0x82, kind: 'dlc' });
@@ -209,7 +204,7 @@ const discoverApplications = (options) =>
 
 
 
-async function resolveContent({ s, domain, service, title, storage, update, dlc, contentType = 1, programIndex = 0 }) {
+async function resolveContent({ s, root, domain, service, title, storage, update, dlc, contentType = 1, programIndex = 0 }) {
   const contentName = { 1: 'Program', 2: 'Data', 3: 'Control' }[contentType];
 
   const handles = [];
@@ -229,7 +224,7 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
     );
     const selected = dlc || update;
     const contentTitle = selected ? selected.contentTitle : title;
-    const latest = success(
+    const latest = dlc?.metaKey ? { data: dlc.metaKey } : success(
       await s.ipc('GetLatestContentMetaKey', database, 6, idBytes(contentTitle)),
       'GetLatestContentMetaKey',
     );
@@ -240,6 +235,9 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
         await s.ipc('Verify selected ' + (dlc ? 'DLC' : 'update') + ' application', database, 22, key),
         'GetOwnerApplicationId',
       );
+      if (dlc && owner.data.readBigUInt64LE() !== BigInt('0x' + title)) {
+        throw new Error('Selected DLC belongs to another application');
+      }
     }
 
     const input = Buffer.alloc(24);
@@ -251,17 +249,19 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
     // right after the content type
     if (programIndex) input[1] = programIndex;
 
-    const content = programIndex
+    const pinnedContent = dlc?.contents?.find((item) => item.contentType === contentType && item.programIndex === programIndex);
+    if (dlc?.contents && !pinnedContent) throw new Error('DLC has no Data content at program index ' + programIndex);
+    const content = pinnedContent ? { data: Buffer.from(pinnedContent.contentId, 'hex') } : programIndex
       ? success(await s.ipc('GetContentIdByTypeAndIdOffset', database, 20, input), 'GetContentIdByTypeAndIdOffset')
       : success(await s.ipc('GetContentIdByType', database, 3, input), 'GetContentIdByType');
     const contentId = Buffer.from(content.data.subarray(0, 16));
 
-    const info = success(
+    const info = pinnedContent ? null : success(
       await s.ipc('Get installed ' + contentName + ' content information', database, programIndex ? 25 : 24, input),
       'Get installed ' + contentName + ' content information',
     ).data;
 
-    const attributes = info[21] & 15;
+    const attributes = pinnedContent ? pinnedContent.attributes : info[21] & 15;
     const store = own(
       success(await s.ipc('OpenContentStorage', ncm, 4, Buffer.from([storage])), 'OpenContentStorage'),
     );
@@ -307,7 +307,19 @@ async function resolveContent({ s, domain, service, title, storage, update, dlc,
         selection: 'dlc',
         applicationTitle: title,
         contentTitle,
+        metaKey: key,
+        programIndex,
+        dataTitle: dlc.dataTitle,
+        dataPatchTitle: dlc.dataPatchTitle,
       });
+      if (root) {
+        const filename = Buffer.alloc(0x301);
+        filename.write(contentPath);
+        await s.write(s.base + 0x2000, filename);
+        const identity = success(await domain.send(s, 'Read DLC data ID', root,
+          pathRequest(618, Buffer.from([attributes]), s.base + 0x2000)), 'Read DLC data ID');
+        source.runtimeProgramId = identity.data.readBigUInt64LE().toString(16).padStart(16, '0');
+      }
     }
 
     return source;
@@ -318,7 +330,9 @@ const resolveProgramContent = (options) => resolveContent({ ...options, dlc: und
 const resolveControlContent = (options) =>
   resolveContent({ ...options, dlc: undefined, contentType: 3 });
 const resolveDlcContent = (options) => {
-  return resolveContent({ ...options, contentType: 2 });
+  const content = options.dlc?.contents?.find((item) => item.contentType === 2 &&
+    (options.programIndex === undefined || item.programIndex === options.programIndex));
+  return resolveContent({ ...options, contentType: 2, programIndex: content?.programIndex ?? options.programIndex ?? 0 });
 };
 
 async function findOriginalContent(options) {

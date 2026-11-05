@@ -374,10 +374,11 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
   }, () => closeHandles(a.s, [...resolvers.values(), registered].filter(Boolean)));
 }
 
-// add-on data patches (0x84) use BKTR over their base add-on (id ^ 0x800). Register (patch, addon) in
+// add-on data patches (0x84) use BKTR over the base add-on named in their metadata. Register (patch, addon) in
 // lr's AddOnContentLocationResolver so FS's OpenDataStorageByDataId composes the two
 async function selectDataPatch({ attachment: a, title, source, operation }) {
-  const addonId = (BigInt('0x' + source.contentTitle) ^ 0x800n).toString(16).padStart(16, '0');
+  const addonId = source.dataTitle;
+  if (!addonId) throw new Error('DLC patch metadata has no original DLC ID');
   const owner = (0xf000000000000000n | BigInt('0x' + crypto.randomBytes(7).toString('hex'))).toString(16);
   let aocLr;
   let existing = null;
@@ -389,22 +390,27 @@ async function selectDataPatch({ attachment: a, title, source, operation }) {
   };
 
   return withCleanup(async () => {
-    const addon = await findOriginalAddOn({
+    const addon = source.originalSource || await findOriginalAddOn({
       s: a.s,
+      root: a.root,
       domain: a.domain,
       service: a.service,
       title,
       addonTitle: addonId,
       storages: [source.storage, 4, 5, 2],
     });
+    if (addon.contentTitle !== addonId || addon.dataPatchTitle && addon.dataPatchTitle !== source.contentTitle) {
+      throw new Error('DLC update does not match its original DLC');
+    }
     source.originalSource = addon;
+    const dataId = addon.runtimeProgramId || addon.contentTitle;
 
     const lr = await a.service('lr');
     aocLr = a.domain.oneHandle(
       success(await a.s.ipc('OpenAddOnContentLocationResolver', lr, 3), 'OpenAddOnContentLocationResolver'),
     );
 
-    const prior = await a.s.ipc('GetRegisteredAddOnContentPaths', aocLr, 5, idBytes(addonId), {
+    const prior = await a.s.ipc('GetRegisteredAddOnContentPaths', aocLr, 5, idBytes(dataId), {
       receive: [
         { address: a.s.base + 0x4800, size: 0x300, mode: 0 },
         { address: a.s.base + 0x4c00, size: 0x300, mode: 0 },
@@ -429,8 +435,8 @@ async function selectDataPatch({ attachment: a, title, source, operation }) {
     await a.s.write(a.s.base + 0x4400, addonPath);
 
     const input = Buffer.alloc(48);
-    idBytes(addonId).copy(input, 0);
-    idBytes(existing ? title : owner).copy(input, 8);
+    idBytes(dataId).copy(input, 0);
+    idBytes(owner).copy(input, 8);
     input[16] = source.attributes;
     input[32] = addon.attributes;
 
@@ -445,16 +451,14 @@ async function selectDataPatch({ attachment: a, title, source, operation }) {
     );
     registered = true;
 
-    return operation({ addonId, addon });
+    return operation({ addonId: dataId, addon });
   }, async () => {
     if (!registered || !aocLr) return;
-    if (!existing) {
-      success(
-        await a.s.ipc('UnregisterApplicationAddOnContent', aocLr, 4, idBytes(owner)),
-        'UnregisterApplicationAddOnContent',
-      );
-      return;
-    }
+    success(await a.s.ipc('UnregisterApplicationAddOnContent', aocLr, 4, idBytes(owner)),
+      'UnregisterApplicationAddOnContent');
+  }, async () => {
+    if (!registered || !aocLr || !existing) return;
+    const dataId = source.originalSource.runtimeProgramId || source.originalSource.contentTitle;
     const p1 = Buffer.alloc(0x300);
     p1.write(existing.path1);
     await a.s.write(a.s.base + 0x4000, p1);
@@ -463,7 +467,7 @@ async function selectDataPatch({ attachment: a, title, source, operation }) {
       p2.write(existing.path2);
       await a.s.write(a.s.base + 0x4400, p2);
       const restore = Buffer.alloc(48);
-      idBytes(addonId).copy(restore, 0);
+      idBytes(dataId).copy(restore, 0);
       idBytes(title).copy(restore, 8);
       existing.attr1.copy(restore, 16);
       existing.attr2.copy(restore, 32);
@@ -478,7 +482,7 @@ async function selectDataPatch({ attachment: a, title, source, operation }) {
       );
     } else {
       const restore = Buffer.alloc(32);
-      idBytes(addonId).copy(restore, 0);
+      idBytes(dataId).copy(restore, 0);
       idBytes(title).copy(restore, 8);
       existing.attr1.copy(restore, 16);
       success(
@@ -608,4 +612,4 @@ function createProgramMounts(attachment) {
   return { openCode, openUpdate, openDataPatch };
 }
 
-module.exports = { createProgramMounts, prepareInstalledLicense };
+module.exports = { createProgramMounts, prepareInstalledLicense, selectDataPatch };

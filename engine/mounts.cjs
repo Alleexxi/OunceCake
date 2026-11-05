@@ -3,6 +3,7 @@ const { TextDecoder } = require('node:util');
 const { success, pathRequest, idBytes, resultError, cleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
 const { discoverUpdates, discoverDlc, discoverDataPatches, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl } = require('./content.cjs');
 const { createProgramMounts, prepareInstalledLicense } = require('./program.cjs');
+const { matchingDlc, verifyDlcSnapshot } = require('./dlc.cjs');
 
 // ncm mounts + metadata used for getting the ftp server ready
 
@@ -18,13 +19,14 @@ function createGameFiles(attachment) {
 
   const send = async (label, handle, bytes) => success(await domain.send(s, label, handle, bytes), label);
 
-  async function open({ title, storage, section = 'romfs', update, dlc, programIndex = 0 }) {
+  async function open({ title, storage, section = 'romfs', update, dlc, originalDlc, programIndex }) {
     let source;
     let mounted;
 
     try {
       source = await (dlc ? resolveDlcContent : resolveProgramContent)({
         s,
+        root,
         domain,
         service,
         title,
@@ -38,7 +40,7 @@ function createGameFiles(attachment) {
       const filename = Buffer.alloc(0x301);
       filename.write(contentPath);
 
-      if (update || dlc || section === 'exefs') {
+      if (!dlc && (update || section === 'exefs')) {
         await s.write(s.base + 0x2000, filename);
 
         const identity = await send(
@@ -49,10 +51,7 @@ function createGameFiles(attachment) {
 
         const runtimeId = identity.data.readBigUInt64LE().toString(16).padStart(16, '0');
 
-        if (dlc) {
-        } else {
-          source.runtimeProgramId = runtimeId;
-        }
+        source.runtimeProgramId = runtimeId;
       }
 
       let handle;
@@ -68,6 +67,10 @@ function createGameFiles(attachment) {
       } else if (section === 'exefs') {
         handle = await openCode({ title: source.runtimeProgramId, storage, attributes, source });
       } else if (source.metaType === 0x84) {
+        if (originalDlc) {
+          source.originalSource = await resolveDlcContent({ s, root, domain, service, title,
+            storage: originalDlc.storage, dlc: originalDlc, programIndex: source.programIndex });
+        }
         // add-on data patches (0x84) only store BKTR deltas over their add-on; combine them via lr + FS 202
         handle = await openDataPatch({ title, source });
       } else {
@@ -698,22 +701,24 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
     const prefix = '/dlc/' + first.contentTitle + '/' + first.version;
     const candidates = group.map((item) => ({
       storage: item.storage,
-      dlc: { contentTitle: item.contentTitle, version: item.version },
+      dlc: item,
     }));
     await mountView(prefix, 'romfs', candidates);
   }
 
   // add-on data patches (content meta 0x84) carry newer data for an add-on, e.g. a Switch 2 Upgrade Pack
-  // built for the current program. Served next to their add-on at /dlc/<data patch id>/<ver>/romfs; one
+  // built for the current program. Match them to their DLC using the metadata's explicit IDs. One
   // that FS won't open as a complete RomFS is logged and skipped. YOINK_NO_DATA_PATCHES=1 skips them all
   const dataPatches = (process.env.YOINK_NO_DATA_PATCHES || process.env.OZ_NO_DATA_PATCHES) ? [] : await discoverDataPatches({ ...a, title });
-  for (const patch of dataPatches) {
+  for (const group of groups(dataPatches)) {
+    const patch = group[0];
     const prefix = '/dlc/' + patch.contentTitle + '/' + patch.version;
+    const originals = matchingDlc(patch, dlc);
+    if (!originals.length) throw new Error('No matching original DLC found for patch ' + patch.contentTitle);
     try {
-      await mountView(prefix, 'romfs', [{
-        storage: patch.storage,
-        dlc: { contentTitle: patch.contentTitle, version: patch.version },
-      }]);
+      await mountView(prefix, 'romfs', group.flatMap((record) => originals.map((originalDlc) => ({
+        storage: record.storage, dlc: record, originalDlc,
+      }))));
     } catch (error) {
       if (error.code === 'FTP_CANCELLED') throw error;
       console.log('Could not open data patch ' + prefix + ': ' + error.message);
@@ -798,6 +803,14 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
 
       const key = latest.data.subarray(0, 16);
 
+      // Deferred DLC paths must still identify the exact metadata/content we enumerated.
+      if (source.metaKey && [0x82, 0x84].includes(source.metaType)) {
+        await verifyDlcSnapshot({ s: a.s, database, latestKey: key,
+          sources: selectedSources.filter((item) => item.storage === source.storage && item.contentTitle === contentTitle),
+        });
+        continue;
+      }
+
       const input = Buffer.alloc(24);
       input[0] = source.contentType;
       key.copy(input, 8);
@@ -818,17 +831,21 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
 async function probeDataPatches({ attachment: a, title, patches }) {
   const files = createGameFiles(a);
   const results = [];
+  const dlc = await discoverDlc({ ...a, title });
 
   for (const patch of patches) {
     const result = { ...patch };
     let mounted;
 
     try {
+      const originalDlc = matchingDlc(patch, dlc)[0];
+      if (!originalDlc) throw new Error('No matching original DLC found for patch ' + patch.contentTitle);
       const options = {
         title,
         storage: patch.storage,
         section: 'romfs',
-        dlc: { contentTitle: patch.contentTitle, version: patch.version },
+        dlc: patch,
+        originalDlc,
       };
 
       try {
@@ -865,4 +882,4 @@ async function probeDataPatches({ attachment: a, title, patches }) {
   return results;
 }
 
-module.exports = { prepareGame, readRomfs, buildIndex, probeDataPatches };
+module.exports = { prepareGame, readRomfs, buildIndex, probeDataPatches, createGameFiles };

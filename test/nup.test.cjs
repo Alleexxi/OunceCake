@@ -117,7 +117,7 @@ function fixture() {
     '/shared.txt': 'upgrade', '/System/AoCUpgradeVersion.txt': '1',
   });
   romfs('/dlc/0100abcd00011801/262144', {
-    version: 262144, contentTitle: '0100abcd00011801', metaType: 0x84,
+    version: 262144, contentTitle: '0100abcd00011801', metaType: 0x84, dataTitle: addonId,
   }, { '/shared.txt': 'patched upgrade', '/System/AoCUpgradeVersion.txt': '1' });
   romfs('/dlc/0100abcd00011002/0', { version: 0, contentTitle: '0100abcd00011002' }, { '/aoc/bonus.txt': 'ordinary DLC' });
   const control = {
@@ -223,6 +223,23 @@ test('all mode retains base, both programs and the add-on data patch identity', 
   assert.equal(packages.find((pack) => pack.kind === 3).id, addonId);
   assert.equal(packages.find((pack) => pack.id === editionId).tags.get(5).toString(), data.control.switch2.name);
   assert.equal(packages.find((pack) => pack.kind === 0).tags.get(5).toString(), data.control.name);
+});
+
+test('DLC patch identity and layering follow metadata even when its ID sorts before the base', async (t) => {
+  const data = fixture();
+  const patch = data.views.find((view) => view.source.metaType === 0x84);
+  const oldPath = patch.path + '.img';
+  patch.source.contentTitle = '0100000000001001';
+  patch.path = '/dlc/' + patch.source.contentTitle + '/262144/romfs';
+  data.files.set(patch.path + '.img', data.files.get(oldPath));
+  data.files.delete(oldPath);
+  const server = await ftpServer(t, data.files);
+  const output = path.join(await directory(t), 'game.nup');
+  await packNup({ ...server, ...data, title: baseId, output, edition: 'both' });
+  const s1 = readArchive(await fs.readFile(output));
+  assert.equal(s1.find((pack) => pack.kind === 3).id, addonId);
+  const s2 = readArchive(await fs.readFile(output.replace('.nup', '-switch2.nup')));
+  assert.equal(s2.find((pack) => pack.kind === 0).romfs.get('/shared.txt').toString(), 'patched upgrade');
 });
 
 test('non-edition games fall back to normal base/update packing', async (t) => {

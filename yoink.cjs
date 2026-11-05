@@ -4,7 +4,7 @@ const { isIPv4 } = require('node:net');
 const { createInterface } = require('node:readline');
 const { titleId, withCleanup } = require('./engine/protocol.cjs');
 const { attachGame } = require('./engine/session.cjs');
-const { discoverGames, listApplicationContent } = require('./engine/content.cjs');
+const { discoverGames, discoverDataPatches, listApplicationContent } = require('./engine/content.cjs');
 const { prepareGame, probeDataPatches } = require('./engine/mounts.cjs');
 const { deployFtp, readImage } = require('./engine/ftp.cjs');
 const { packNup } = require('./engine/nup.cjs');
@@ -262,9 +262,7 @@ async function main(argv = process.argv.slice(2)) {
           console.log('  ' + c.id.toUpperCase() + '  v' + c.version + '  ' + c.typeName + '  ' + storageNames[c.storage] +
             (c.installType ? '  install type ' + c.installType : ''));
         }
-        const patches = content
-          .filter((c) => c.type === 0x84)
-          .map((c) => ({ contentTitle: c.id, version: c.version, storage: c.storage }));
+        const patches = await discoverDataPatches({ ...attachment, title });
         if (!patches.length) console.log('  (no add-on data patches)');
         for (const r of await probeDataPatches({ attachment, title, patches })) {
           console.log('Data patch ' + r.contentTitle.toUpperCase() + ' v' + r.version + ':');

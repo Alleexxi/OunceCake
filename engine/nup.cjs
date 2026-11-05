@@ -14,10 +14,13 @@ const { FtpClient } = require('./ftp-client.cjs');
 const NONE = 0xffffffff;
 const KIND = { base: 0, update: 1, addon: 2, addonUpdate: 3 };
 
-// an add-on data patch (content meta 0x84, id = add-on id ^ 0x800) is packed as addon_update (SPEC kind 3)
+// an add-on data patch (content meta 0x84) is packed as addon_update (SPEC kind 3)
 // under the id of the add-on it updates, the way updates carry their program's id
 const isDataPatch = (source) => source.metaType === 0x84;
-const patchedAddonId = (id) => (BigInt('0x' + id) ^ 0x800n).toString(16).padStart(16, '0');
+const patchedAddonId = (source) => {
+  if (!source.dataTitle) throw new Error('DLC patch metadata has no original DLC ID');
+  return source.dataTitle;
+};
 const STANDALONE_UPDATE = 1;
 const CODEC = { raw: 0, zstd: 1 };
 const MEMORY_LIMIT = 64 * 1024 * 1024; // files bigger than this get spilled to disk while they come in
@@ -342,7 +345,14 @@ function planPackages(views, title, edition = 'switch2') {
     const addonGroups = [];
     const dlcGroups = allGroups
       .filter((group) => group.prefix.startsWith('/dlc/'))
-      .sort((a, b) => a.prefix.localeCompare(b.prefix));
+      .sort((a, b) => {
+        const first = (a.romfs || a.exefs).source;
+        const second = (b.romfs || b.exefs).source;
+        const firstId = isDataPatch(first) ? patchedAddonId(first) : first.contentTitle;
+        const secondId = isDataPatch(second) ? patchedAddonId(second) : second.contentTitle;
+        return firstId.localeCompare(secondId) || Number(isDataPatch(first)) - Number(isDataPatch(second)) ||
+          first.version - second.version || a.prefix.localeCompare(b.prefix);
+      });
 
     for (const dlcGroup of dlcGroups) {
       if (!dlcGroup.exefs && isDummyOnlyRomfs(dlcGroup.romfs)) {
@@ -400,7 +410,7 @@ function planPackages(views, title, edition = 'switch2') {
         prefix: group.prefix,
         switch2: false,
         kind: isDataPatch(source) ? KIND.addonUpdate : KIND.addon,
-        titleId: isDataPatch(source) ? patchedAddonId(source.contentTitle) : source.contentTitle || title,
+        titleId: isDataPatch(source) ? patchedAddonId(source) : source.contentTitle || title,
         version: source.version >>> 0,
         flags: 0,
         root: addonRoot,
@@ -455,7 +465,7 @@ function planPackages(views, title, edition = 'switch2') {
         kind === KIND.base
           ? title
           : kind === KIND.addonUpdate
-            ? patchedAddonId(source.contentTitle)
+            ? patchedAddonId(source)
             : source.contentTitle || title,
       version: source.version >>> 0,
       flags: 0,
