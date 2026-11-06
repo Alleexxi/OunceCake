@@ -678,7 +678,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
   });
 
   const { base, composedUpdate } = await prepareBaseProgram({
-    mountView, installed, updateGroups,
+    title, mountView, installed, updateGroups,
     readCodeHeader: async (mount, filename, length) => {
       cancelled();
       const opened = success(await a.filesystem.openFile(a.s, mount.handle, filename), 'Read composed program header');

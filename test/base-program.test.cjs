@@ -16,13 +16,15 @@ const codeEntries = [
 function fixture({ failure, groups = [[patch]], composedFailure, badCode = false } = {}) {
   const calls = [];
   const headers = [];
+  const baseSource = failure?.source || source;
   return {
-    installed, updateGroups: groups, calls, headers,
+    title, installed, updateGroups: groups, calls, headers,
     async mountView(prefix, section, candidates) {
       calls.push({ prefix, section, candidates });
       if (!candidates[0].update && section === 'romfs' && failure) throw failure;
       if (candidates[0].update && composedFailure) throw composedFailure;
-      return { source: candidates[0].update ? { ...source, selection: 'update', ...patch } : source, entries: codeEntries };
+      return { source: candidates[0].update ? { metaType: 0x81, selection: 'update', ...candidates[0].update,
+        storage: candidates[0].storage } : baseSource, entries: codeEntries };
     },
     async readCodeHeader(mount, filename, length) {
       assert.equal(length, 4);
@@ -65,22 +67,60 @@ test('zero-header card composes its matching patch without opening standalone ba
   assert.deepEqual(f.headers, ['/main', '/main.npdm']);
 });
 
-test('missing, skipped, different-version or different-storage companions do not enable fallback', async () => {
-  for (const groups of [[], [[{ ...patch, version: 131072 }]], [[{ ...patch, storage: 4 }]]]) {
+test('missing, skipped or unrelated updates do not enable fallback', async () => {
+  for (const groups of [[], [[{ ...patch, contentTitle: '0400999900000800' }]]]) {
     const f = fixture({ failure: zeroHeader(), groups });
-    await assert.rejects(prepareBaseProgram(f), /no selected same-version card patch/);
+    await assert.rejects(prepareBaseProgram(f), /no matching update is selected/);
     assert.equal(f.calls.length, 1);
   }
 });
 
-test('nonzero corruption, digital zero headers, absent partitions and cancellation are not swallowed', async () => {
-  for (const error of [new Error('Invalid RomFS: metadata extent'), zeroHeader({ ...source, storage: 4 }),
+test('metadata corruption, non-application sources, absent partitions and cancellation are not swallowed', async () => {
+  for (const error of [new Error('Invalid RomFS: metadata extent'), zeroHeader({ ...source, metaType: 0x82 }),
+    zeroHeader({ ...source, selection: 'update' }),
     Object.assign(new Error('absent'), { code: 'GAME_ROMFS_ABSENT' }),
     Object.assign(new Error('cancelled'), { code: 'FTP_CANCELLED' })]) {
     const f = fixture({ failure: error });
     await assert.rejects(prepareBaseProgram(f), (actual) => actual === error);
     assert.equal(f.calls.length, 1);
   }
+});
+
+test('reported nonzero internal-storage header tries the newer selected update', async () => {
+  const digitalTitle = '01002e7016c46000';
+  const digitalSource = { ...source, storage: 4, version: 131072,
+    contentPath: '@UserContent://registered/0000008F/0788dcf4f009b8f746fa6fa63420b95d.nca' };
+  const header = Buffer.alloc(0x50);
+  Buffer.from('72e1005a85d02b5d91bf9d5c40a8cecf', 'hex').copy(header);
+  let failure;
+  try { await readRomfs(async () => header, 759857152); } catch (error) { failure = error; }
+  assert.equal(failure.code, 'GAME_ROMFS_INVALID_HEADER');
+  failure.source = digitalSource;
+  const update = { contentTitle: '01002e7016c46800', version: 1966080, storage: 4 };
+  const f = fixture({ failure, groups: [[{ ...update, version: 65536 }], [update]] });
+  f.title = digitalTitle;
+  const result = await prepareBaseProgram(f);
+  assert.equal(result.composedUpdate, update);
+  assert.equal(result.base.source.version, 1966080);
+  assert.equal(result.base.source.originalSource, digitalSource);
+  assert.deepEqual(f.calls[1].candidates, [{ storage: 4, update: { contentTitle: update.contentTitle, version: update.version } }]);
+  assert.deepEqual(f.headers, ['/main', '/main.npdm']);
+});
+
+test('composition accepts a selected update on another storage device', async () => {
+  const digitalSource = { ...source, storage: 4 };
+  const f = fixture({ failure: zeroHeader(digitalSource), groups: [[{ ...patch, version: 131072, storage: 5 }]] });
+  const result = await prepareBaseProgram(f);
+  assert.equal(result.base.source.storage, 5);
+  assert.equal(result.base.source.originalSource.storage, 4);
+  assert.equal(result.base.source.version, 131072);
+});
+
+test('a selected same-version card companion remains preferred over a newer update', async () => {
+  const f = fixture({ failure: zeroHeader(), groups: [[{ ...patch, version: 131072, storage: 4 }], [patch]] });
+  const result = await prepareBaseProgram(f);
+  assert.equal(result.composedUpdate, patch);
+  assert.equal(result.base.source.storage, 2);
 });
 
 test('failed composition or invalid composed executable headers abort preparation', async () => {
