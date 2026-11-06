@@ -54,6 +54,9 @@ async function consoleFixture(t, { rows = baseline, previous = null, failure, pr
         return { result: 0 };
       }
       if (label === 'Open selected game CodeFS') {
+        // Model the reported game-card + installed-update failure. The NCA's
+        // location and the loader's original-program storage are separate inputs.
+        if (input[1] !== originalSource.storage) return { result: 0x97000408, data: Buffer.alloc(0) };
         if (failure) throw failure;
         return { result: 0, handle: 21 };
       }
@@ -114,12 +117,12 @@ async function consoleFixture(t, { rows = baseline, previous = null, failure, pr
   return { state, s, open };
 }
 
-test('Switch 2 CodeFS uses its selected NCA path, attributes, storage and program index', async (t) => {
+test('Switch 2 CodeFS resolves the base storage while registering the selected update NCA', async (t) => {
   const f = await consoleFixture(t);
   assert.equal(await f.open(), 21);
   const code = f.state.calls.find((call) => call.label === 'Open selected game CodeFS');
   assert.equal(code.input[0], source.attributes);
-  assert.equal(code.input[1], source.storage);
+  assert.equal(code.input[1], originalSource.storage);
   assert.equal(code.input.readBigUInt64LE(8), BigInt('0x' + runtimeProgramId));
   assert.equal(f.state.locations[0].contentPath, source.contentPath);
   assert.equal(Buffer.from(f.state.locations[0].attributes, 'hex')[0], source.attributes);

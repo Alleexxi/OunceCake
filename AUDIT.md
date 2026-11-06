@@ -23,15 +23,17 @@ establishes a numeric mount/file limit.
 
 ## Findings and changes
 
-1. **Wrong selection inputs for Program[1].** `selectPatch` replaced the resolver's
+1. **Program[1] attributes and loader-storage regression.** `selectPatch` replaced the resolver's
    Program[0] path with Program[1]'s path, but retained Program[0]'s attributes.
-   `openUpdate` also supplied the original base's storage for the standalone
-   Program[1] CodeFS, even when it lived on another storage device. Program[1]
-   now supplies its own NCM-selected path, attributes and storage, without
-   looking up Program[0]'s locations. Program[0] retains its base-storage composition
-   path. This is a concrete selection defect and a plausible explanation when
-   attributes/storage differ; if they are identical on the affected console,
-   this defect alone does not explain the timeout.
+   Program[1] now supplies its own NCM-selected path and attributes, without
+   looking up Program[0]'s locations. My initial audit incorrectly classified
+   use of the base's storage for the loader as a defect and changed that input
+   to the update's storage in `c2d4942`. A subsequent console test of Super Mario
+   Bros. Wonder (base storage 2, update storage 4) failed at CodeFS in 1.1 seconds
+   with `0x97000408` after that change. The loader storage has been restored to
+   the original base's storage for both programs, matching the previous behavior
+   and upstream. The selected update NCA path still identifies its actual storage.
+   This is a correction to the audit, not proof of the cause of the earlier timeout.
 
 2. **Prior program locations were lost.** Temporary registration unconditionally
    removed the runtime program's path afterwards. It now snapshots and restores
@@ -82,7 +84,7 @@ resources at the failing step; it is not evidence that a resource limit caused i
 `npm test`: 63 tests pass. New coverage exercises real selection/mapping logic
 against an in-memory console through the ns2jb run-directory module boundary, and
 the actual mount planner with mocked console services. It checks cross-storage
-Program[1] selection, Program[0] composition inputs, restoration after a CodeFS
+Program[1] selection with base-storage loader lookup, Program[0] composition inputs, restoration after a CodeFS
 timeout, conflicting/empty maps, both program-index snapshots, mount order,
 missing versus failed editions, executable validation, Switch 1 preparation, and
 rejection of incomplete Switch 2 NUPs. Existing FTP binary-transfer, resume,

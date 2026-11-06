@@ -584,10 +584,12 @@ function createProgramMounts(attachment) {
       source: args.source,
       originalSource: selection.originalContent,
       operation: async () => {
-        // base app and other parts can be on different devices (internal / sd). work that out
+        // The loader resolves the original program on the base's storage, then
+        // follows our registered update path. This also applies to Program[1];
+        // passing the update's storage breaks game-card base lookup (0x408).
         const mountArgs = {
           title: selection.runtimeProgramId,
-          storage: args.programIndex ? selection.patch.storage : selection.original.storage,
+          storage: selection.original.storage,
           attributes: parseInt(selection.patch.attributes.slice(0, 2), 16),
         };
         if (args.section === 'exefs') return openCodeRaw(mountArgs);
