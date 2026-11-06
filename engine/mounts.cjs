@@ -1,7 +1,7 @@
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
 const { success, pathRequest, idBytes, resultError, cleanup, withCleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
-const { discoverUpdates, discoverDlc, discoverDataPatches, resolveContent, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl } = require('./content.cjs');
+const { discoverUpdates, discoverDlc, discoverDataPatches, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl } = require('./content.cjs');
 const { createProgramMounts, prepareInstalledLicense } = require('./program.cjs');
 const { matchingDlc, verifyDlcSnapshot } = require('./dlc.cjs');
 const { prepareBaseProgram } = require('./base-program.cjs');
@@ -9,15 +9,6 @@ const { prepareBaseProgram } = require('./base-program.cjs');
 // ncm mounts + metadata used for getting the ftp server ready
 
 const MAX_CHUNK = 0x40000;
-
-// extra filesystems a package can carry next to its exefs/romfs. NUP puts them under <root>/data/<section>.
-// content type in the package metadata, and the FS proxy type FS opens it as (legal info mounts as a manual)
-const DATA_SECTIONS = {
-  control: { contentType: 3, proxyType: 3 },
-  legal: { contentType: 5, proxyType: 4 },
-  manual: { contentType: 4, proxyType: 4 },
-  logo: { contentType: 1, proxyType: 2 },
-};
 const safeSize = (n) => { // lol, ai put this in. in what situation would this ever happen
   return Number(n);
 };
@@ -33,25 +24,7 @@ function createGameFiles(attachment) {
     let source;
     let mounted;
 
-    const data = DATA_SECTIONS[section];
-
     try {
-      if (data) {
-        source = await resolveContent({
-          s, root, domain, service, title, storage, update, contentType: data.contentType, programIndex,
-        });
-        const filename = Buffer.alloc(0x301);
-        filename.write(source.contentPath);
-        await s.write(s.base + 0x2000, filename);
-        const input = Buffer.alloc(16);
-        input[0] = source.attributes;
-        input.writeUInt32LE(data.proxyType, 4);
-        idBytes(title).copy(input, 8);
-        const handle = domain.oneHandle(await send('Open game ' + section, root, pathRequest(10, input, s.base + 0x2000)));
-        mounted = { handle, kind: 'filesystem', source, title };
-        return mounted;
-      }
-
       source = await (dlc ? resolveDlcContent : resolveProgramContent)({
         s,
         root,
@@ -583,7 +556,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
   }
 
   async function mountViewTimed(prefix, section, candidates, allowAbsent) {
-    if (prefix.startsWith('/updates/') && !DATA_SECTIONS[section]) {
+    if (prefix.startsWith('/updates/')) {
       console.log('Opening ' + prefix + '/' + section, ' (This takes a LOT of time! Don\'t assume we crashed!)');
     } else {
       console.log('Opening ' + prefix + '/' + section);
@@ -658,21 +631,6 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
     return { ...mounted, entries };
   }
 
-  // legal info, manuals, control and logo. optional: a package without one (or one FS won't open)
-  // just logs a line. YOINK_NO_EXTRAS=1 skips them all
-  const skipExtras = Boolean(process.env.YOINK_NO_EXTRAS || process.env.OZ_NO_EXTRAS);
-  async function mountExtras(prefix, candidates, sections) {
-    if (skipExtras) return;
-    for (const section of sections) {
-      try {
-        await mountView(prefix, section, candidates);
-      } catch (error) {
-        if (error.code === 'FTP_CANCELLED') throw error;
-        console.log('No ' + section + ' at ' + prefix + ': ' + error.message);
-      }
-    }
-  }
-
   function groups(records) {
     const grouped = new Map();
 
@@ -741,11 +699,6 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
     }
   }
 
-  // the base's own extras live in its application package, even when its program was composed with an update
-  const baseStorages = [base.source.originalSource?.storage ?? base.source.storage, 4, 5, 2]
-    .filter((storage, i, all) => all.indexOf(storage) === i);
-  await mountExtras('/base', baseStorages.map((storage) => ({ storage })), ['control', 'legal', 'manual', 'logo']);
-
   for (const group of updateGroups) {
     if (composedUpdate && group[0].contentTitle === composedUpdate.contentTitle && group[0].version === composedUpdate.version) continue;
     const prefix = '/updates/' + group[0].version;
@@ -755,10 +708,11 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
       update: { contentTitle: item.contentTitle, version: item.version },
     }));
     const update = await mountView(prefix, 'romfs', candidates);
-    const sameStorage = candidates.filter((candidate) => candidate.storage === update.source.storage);
-    await mountView(prefix, 'exefs', sameStorage);
-    // update manuals are usually patches over the base manual, which FS won't open on their own; those just log
-    await mountExtras(prefix, sameStorage, ['control', 'legal', 'manual']);
+    await mountView(
+      prefix,
+      'exefs',
+      candidates.filter((candidate) => candidate.storage === update.source.storage),
+    );
   }
 
   for (const group of groups(dlc)) {

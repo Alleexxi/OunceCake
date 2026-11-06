@@ -214,20 +214,6 @@ function addEntries(root, entries) {
   return files;
 }
 
-// everything else a package came with (legal info, manual, control, logo) goes under <root>/data/<section>,
-// the spec's slot for "anything else the dump provided". the first group that has a section supplies it
-const DATA_SECTIONS = ['control', 'legal', 'manual', 'logo'];
-function attachData(pack, ...groups) {
-  for (const section of DATA_SECTIONS) {
-    const view = groups.find((group) => group?.[section])?.[section];
-    if (!view) continue;
-    const data = child(pack.root, 'data', () => directory('data'));
-    const dir = child(data, section, () => directory(section));
-    for (const file of addEntries(dir, view.entries)) pack.dataFiles.push({ ...file, ftpPath: view.path + file.path });
-  }
-  return pack;
-}
-
 function isDummyOnlyRomfs(romfsView) {
   if (!romfsView) return false;
   const files = romfsView.entries.filter((entry) => entry.type !== 'directory');
@@ -396,7 +382,6 @@ function planPackages(views, title, edition = 'switch2') {
       exefsDir: null,
       romfsDir: null,
       exefsFiles: [],
-      dataFiles: [],
       romfs: null,
       romfsLayers: [],
       meta: [],
@@ -409,8 +394,6 @@ function planPackages(views, title, edition = 'switch2') {
         ftpPath: s2Group.exefs.path + file.path,
       }));
     }
-
-    attachData(basePack, p0Update, baseGroup);
 
     if (layerSpecs.length > 0) {
       basePack.romfsDir = child(root, 'romfs', () => directory('romfs'));
@@ -434,7 +417,6 @@ function planPackages(views, title, edition = 'switch2') {
         exefsDir: null,
         romfsDir: null,
         exefsFiles: [],
-        dataFiles: [],
         romfs: null,
         romfsLayers: [],
         meta: [],
@@ -465,7 +447,7 @@ function planPackages(views, title, edition = 'switch2') {
     return packages;
   }
 
-  const planned = allGroups.filter((group) => group.romfs || group.exefs).map((group) => {
+  const planned = allGroups.map((group) => {
     const source = (group.romfs || group.exefs).source;
     const kind =
       group.prefix === '/base'
@@ -491,7 +473,6 @@ function planPackages(views, title, edition = 'switch2') {
       exefsDir: null,
       romfsDir: null,
       exefsFiles: [],
-      dataFiles: [],
       romfs: null,
       romfsLayers: [],
       meta: [],
@@ -516,7 +497,7 @@ function planPackages(views, title, edition = 'switch2') {
       pack.romfsLayers = [layer];
     }
 
-    return attachData(pack, group);
+    return pack;
   });
 
   const packages = planned.filter((pack) => {
@@ -885,12 +866,10 @@ async function packNup({ host, port, views, title, name, output, edition = 'swit
     const exefsJobs = new Map();
     for (const target of targets)
       for (const pack of target.packages)
-        for (const file of [...pack.exefsFiles, ...pack.dataFiles]) {
+        for (const file of pack.exefsFiles) {
           let job = exefsJobs.get(file.ftpPath);
           if (!job) {
-            // only exefs files feed the npdm/build id metadata
-            const exefs = pack.exefsFiles.includes(file);
-            job = { ftpPath: file.ftpPath, size: file.size, path: exefs ? file.path : null, consumers: [] };
+            job = { ftpPath: file.ftpPath, size: file.size, path: file.path, consumers: [] };
             exefsJobs.set(file.ftpPath, job);
           }
           job.consumers.push({ pack, file, blob: target.blob });
@@ -925,7 +904,6 @@ async function packNup({ host, port, views, title, name, output, edition = 'swit
     for (const target of targets) {
       for (const pack of target.packages) {
         if (pack.exefsFiles.length) console.log('  ' + pack.prefix + '/exefs  ' + pack.exefsFiles.length + ' files');
-        if (pack.dataFiles.length) console.log('  ' + pack.prefix + '/data  ' + pack.dataFiles.length + ' files');
         if (pack.kind === KIND.base || pack.kind === KIND.update) {
           pack.titleId = npdmProgramId(pack.npdm) || pack.titleId;
         }

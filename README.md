@@ -48,19 +48,6 @@ Each RomFS is pulled as one big image instead of thousands of small files, reduc
 
 If the base storage does not start with a valid RomFS header, Yoink can try opening the base with its selected application update through the console. This applies to internal storage, SD and game cards, including nonzero header bytes. The confirmed same-version card combination is preferred when available; otherwise Yoink uses the newest selected update for the game's patch ID. It validates the composed RomFS tree and the `main`/`main.npdm` headers before serving or packing them as one base package at the update version. The standalone base ExeFS is skipped, and the selected update is not packed twice. A missing update or failed validation still stops the dump. Header errors include the storage size and prefix for diagnosis. Composition has been confirmed on a MOUSE: P.I. For Hire card; other layouts still need console testing.
 
-#### Legal info, manuals and control data
-
-As well as ExeFS and RomFS, Yoink opens the other filesystems a package ships with: legal information (`LegalInformation` content: `legalinfo.xml` and the IP notices), the HTML manual (`HtmlDocument`), the Control content (NACP and every icon) and, for the base, the program's logo partition. They are served over FTP at `<package>/legal`, `/manual`, `/control` and `/logo`. In a `.nup` they go in each package's `data/` folder, the spec's slot for anything else the dump provides:
-
-```
-<root>/data/legal/...
-<root>/data/manual/...
-<root>/data/control/...
-<root>/data/logo/...
-```
-
-The base reads these from its own application package. Each update gets its own legal info, manual and control data. The flattened `--edition switch2` package uses the update's copies and falls back to the base's. These extras are optional: if a package has none, or FS won't open one, Yoink logs a line and carries on. Update manuals are usually patches over the base manual, and FS can't open those on their own, so they are often skipped. `YOINK_NO_EXTRAS=1` leaves all of them out. Mounting by content type follows [misshexa66's upstream work](https://github.com/misshexa66/OunceCake/commit/9a5e8c0b11f4c75b8553c2ee641c6225af80ec5b).
-
 #### Stalled transfers
 
 If a data connection goes quiet for 5 minutes, or drops before the whole file has arrived, Yoink opens a new FTP connection and continues from the last received byte with `REST`. It tries up to 5 times before giving up. Already-received bytes are kept, so a hiccup late in a large RomFS image doesn't start that image over. `YOINK_STALL_SECONDS` changes the quiet period and `YOINK_RESUME_ATTEMPTS` the number of tries.

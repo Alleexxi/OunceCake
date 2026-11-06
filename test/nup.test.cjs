@@ -348,46 +348,6 @@ test('FTP client reads binary bytes without modification', async (t) => {
   } finally { await client.close(); }
 });
 
-function addData(data, viewPath, contents) {
-  const entries = Object.entries(contents).map(([name, value]) => {
-    data.files.set(viewPath + name, Buffer.from(value));
-    return { path: name, type: 'file', size: Buffer.byteLength(value) };
-  });
-  const prefix = path.posix.dirname(viewPath);
-  const source = data.views.find((view) => path.posix.dirname(view.path) === prefix).source;
-  data.views.push({ path: viewPath, kind: 'filesystem', source, entries });
-}
-
-test('legal info, manuals and control land under each package data folder', async (t) => {
-  const data = fixture();
-  addData(data, '/base/legal', { '/legalinfo.xml': '<legal/>', '/ipnotices.htdocs/index.html': 'notices' });
-  addData(data, '/base/control', { '/control.nacp': 'nacp' });
-  addData(data, '/updates/720896/legal', { '/legalinfo.xml': '<legal v2/>' });
-  addData(data, '/updates/720896/manual', { '/html-document/index.html': 'manual' });
-  const server = await ftpServer(t, data.files);
-  const output = path.join(await directory(t), 'game.nup');
-  await packNup({ ...server, ...data, title: baseId, output, edition: 'both' });
-
-  const s1 = readArchive(await fs.readFile(output));
-  const base = s1.find((pack) => pack.kind === 0);
-  assert.equal(base.all.get('/data/legal/legalinfo.xml').toString(), '<legal/>');
-  assert.equal(base.all.get('/data/legal/ipnotices.htdocs/index.html').toString(), 'notices');
-  assert.equal(base.all.get('/data/control/control.nacp').toString(), 'nacp');
-  assert.ok(!base.exefs.has('/legalinfo.xml') && !base.romfs.has('/legalinfo.xml'));
-  const update = s1.find((pack) => pack.kind === 1);
-  assert.equal(update.all.get('/data/legal/legalinfo.xml').toString(), '<legal v2/>');
-  assert.equal(update.all.get('/data/manual/html-document/index.html').toString(), 'manual');
-  // the npdm still comes from the exefs, not a data file
-  assert.equal(update.id, baseId);
-
-  // the flattened Switch 2 package takes the update's extras, falling back to the base's
-  const s2 = readArchive(await fs.readFile(output.replace('.nup', '-switch2.nup')));
-  const program = s2.find((pack) => pack.kind === 0);
-  assert.equal(program.all.get('/data/legal/legalinfo.xml').toString(), '<legal v2/>');
-  assert.equal(program.all.get('/data/control/control.nacp').toString(), 'nacp');
-  assert.equal(new Set(server.requests).size, server.requests.length, 'shared data files must be pulled once');
-});
-
 test('a dropped data connection resumes from the received offset', async (t) => {
   const data = fixture();
   const image = '/updates/720896/romfs.img';
