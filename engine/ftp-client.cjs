@@ -5,6 +5,10 @@ const net = require('node:net');
 const REPLY_TIMEOUT = 60000;
 const DONE_TIMEOUT = 30000; // how long to wait for "226" once all the data is in
 const NOOP_EVERY = 30000;
+// how long a data connection may sit without a byte before it's treated as stalled and resumed.
+// composed update RomFS reads on slow storage can pause for minutes; YOINK_STALL_SECONDS overrides it
+const STALL_TIMEOUT = (Number(process.env.YOINK_STALL_SECONDS) || 300) * 1000;
+const RESUME_ATTEMPTS = Number(process.env.YOINK_RESUME_ATTEMPTS ?? 5);
 
 function connect(host, port) {
   return new Promise((resolve, reject) => {
@@ -145,19 +149,53 @@ class FtpClient {
     return reply;
   }
 
-  // streams a file through onChunk (awaited, so slow consumers slow the transfer down instead of eating ram)
+  // streams a file through onChunk (awaited, so slow consumers slow the transfer down instead of eating ram).
+  // a data connection that goes quiet or drops early is resumed where it stopped with REST on a fresh
+  // control connection, so one hiccup in a multi-gigabyte image doesn't throw the whole dump away
   async retrieve(filename, size, onChunk) {
-    const passive = await this.expect('EPSV', [229]);
-    const port = Number(/\(\|\|\|(\d+)\|\)/.exec(passive.text)?.[1]);
-    if (!port) throw new Error('FTP EPSV reply was not understood: ' + passive.text);
-
-    const data = await connect(this.host, port);
-    data.on('error', () => {}); // surfaces through the for await below instead
-    data.setTimeout(300000, () => data.destroy(new Error('FTP data connection stalled on ' + filename)));
-
     let received = 0;
-    let keepalive;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        received = await this.transfer(filename, size, received, onChunk);
+      } catch (error) {
+        if (!error.resumable || attempt >= RESUME_ATTEMPTS) throw error;
+        received = error.received;
+        console.warn('\n  (' + error.message + '; resuming at byte ' + received + ', attempt ' +
+          (attempt + 1) + '/' + RESUME_ATTEMPTS + ')');
+        const delay = Number(process.env.YOINK_RESUME_DELAY_MS ?? 1000);
+        await new Promise((resolve) => setTimeout(resolve, Math.min(delay * 2 ** attempt, 15 * delay)));
+        await this.reconnect();
+        continue;
+      }
+      return;
+    }
+  }
 
+  async transfer(filename, size, offset, onChunk) {
+    let received = offset;
+    // anything that isn't our own consumer failing or the server refusing the file can be picked up again
+    const resumable = (error) => Object.assign(error, { resumable: true, received });
+
+    let data;
+    try {
+      const passive = await this.expect('EPSV', [229]);
+      const port = Number(/\(\|\|\|(\d+)\|\)/.exec(passive.text)?.[1]);
+      if (!port) throw new Error('FTP EPSV reply was not understood: ' + passive.text);
+      data = await connect(this.host, port);
+      if (offset) await this.expect('REST ' + offset, [350]);
+    } catch (error) {
+      data?.destroy();
+      throw error.code === 'FTP_TIMEOUT' || this.failure || error.syscall ? resumable(error) : error;
+    }
+
+    data.on('error', () => {}); // surfaces through the for await below instead
+    let stalled = false;
+    data.setTimeout(STALL_TIMEOUT, () => {
+      stalled = true;
+      data.destroy(new Error('FTP data connection stalled on ' + filename));
+    });
+
+    let keepalive;
     try {
       await this.expect('RETR ' + filename, [150]);
 
@@ -167,28 +205,35 @@ class FtpClient {
         this.socket.write('NOOP\r\n');
       }, NOOP_EVERY);
 
-      for await (const chunk of data) {
-        received += chunk.length;
-        if (received > size) throw new Error('FTP sent more data than expected for ' + filename);
-        await onChunk(chunk);
+      try {
+        for await (const chunk of data) {
+          if (received + chunk.length > size) throw new Error('FTP sent more data than expected for ' + filename);
+          await onChunk(chunk);
+          received += chunk.length;
+        }
+      } catch (error) {
+        if (stalled || error.syscall) throw resumable(error);
+        throw error;
       }
     } finally {
       clearInterval(keepalive);
       data.destroy();
     }
 
+    if (received !== size) {
+      throw resumable(new Error('FTP transfer of ' + filename + ' was short: ' + received + ' of ' + size + ' bytes'));
+    }
+
     try {
       await this.expect(null, [226], DONE_TIMEOUT);
     } catch (error) {
       // every byte made it, so only the control connection died. carry on with a new one
-      if (error.code !== 'FTP_TIMEOUT' || received !== size) throw error;
+      if (error.code !== 'FTP_TIMEOUT' && !this.failure) throw error;
       console.warn('\n  (FTP control connection went quiet after ' + filename + ', reconnecting)');
       await this.reconnect();
     }
 
-    if (received !== size) {
-      throw new Error('FTP transfer of ' + filename + ' was short: ' + received + ' of ' + size + ' bytes');
-    }
+    return received;
   }
 
   async close() {

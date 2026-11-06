@@ -205,7 +205,7 @@ const discoverApplications = (options) =>
 
 
 async function resolveContent({ s, root, domain, service, title, storage, update, dlc, contentType = 1, programIndex = 0 }) {
-  const contentName = { 1: 'Program', 2: 'Data', 3: 'Control' }[contentType];
+  const contentName = { 1: 'Program', 2: 'Data', 3: 'Control', 4: 'HtmlDocument', 5: 'LegalInformation' }[contentType];
 
   const handles = [];
   const own = (reply) => {
@@ -655,6 +655,6 @@ async function discoverGames({ s, root, domain, service, filesystem, shouldStop 
 
 module.exports = {
   discoverGames, discoverUpdates, discoverDlc, discoverDataPatches, listApplicationContent,
-  resolveProgramContent, resolveDlcContent, findOriginalContent, findOriginalAddOn,
+  resolveContent, resolveProgramContent, resolveDlcContent, findOriginalContent, findOriginalAddOn,
   isInstalledUpdate, programMatchesApplication, readControl,
 };
