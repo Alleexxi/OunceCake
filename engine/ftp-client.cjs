@@ -153,7 +153,7 @@ class FtpClient {
 
     const data = await connect(this.host, port);
     data.on('error', () => {}); // surfaces through the for await below instead
-    data.setTimeout(60000, () => data.destroy(new Error('FTP data connection stalled on ' + filename)));
+    data.setTimeout(300000, () => data.destroy(new Error('FTP data connection stalled on ' + filename)));
 
     let received = 0;
     let keepalive;
