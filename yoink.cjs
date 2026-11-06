@@ -289,7 +289,7 @@ async function main(argv = process.argv.slice(2)) {
       }
       if (shouldStop()) return;
       ui?.setStage('Opening game content', { host });
-      const prepared = await prepareGame({ attachment, title, images: Boolean(nup), shouldStop });
+      const prepared = await prepareGame({ attachment, title, images: Boolean(nup), edition, shouldStop });
       if (shouldStop()) return;
       ui?.setStage('Starting FTP');
       server = await deployFtp({ attachment, image, ...prepared, port });

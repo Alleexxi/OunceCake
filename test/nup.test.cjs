@@ -277,6 +277,21 @@ test('non-edition games fall back to normal base/update packing', async (t) => {
   assert.equal(packages[0].tags.get(5).toString(), data.control.name);
 });
 
+test('missing Switch 2 executable files abort packing before connecting or creating output', async (t) => {
+  const dir = await directory(t);
+  for (const edition of ['switch2', 'both', 'all']) {
+    for (const missing of ['exefs', '/main', '/main.npdm']) {
+      const data = fixture();
+      const code = data.views.find((view) => view.path.startsWith('/switch2/') && view.path.endsWith('/exefs'));
+      if (missing === 'exefs') data.views = data.views.filter((view) => view !== code);
+      else code.entries = code.entries.filter((entry) => entry.path !== missing);
+      await assert.rejects(packNup({ ...data, title: baseId, host: '127.0.0.1', port: 0,
+        output: path.join(dir, 'game.nup'), edition }), /missing Switch 2 ExeFS/);
+      assert.deepEqual(await fs.readdir(dir), []);
+    }
+  }
+});
+
 test('composed card views pack as one base at the patch version with unchanged executable bytes', async (t) => {
   const data = fixture();
   const nativeId = '040094b02455c000';

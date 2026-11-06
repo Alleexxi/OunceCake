@@ -315,6 +315,16 @@ function planPackages(views, title, edition = 'switch2') {
     .filter((group) => group.switch2 && (group.exefs || group.romfs))
     .sort((a, b) => ((b.romfs || b.exefs).source.version >>> 0) - ((a.romfs || a.exefs).source.version >>> 0));
 
+  if (edition !== 'switch1') {
+    for (const group of switch2Updates) {
+      for (const filename of ['/main', '/main.npdm']) {
+        if (!group.exefs?.entries.some((entry) => entry.path === filename && entry.type === 'file' && entry.size > 0)) {
+          throw new Error('Cannot pack ' + group.prefix + ': missing Switch 2 ExeFS ' + filename);
+        }
+      }
+    }
+  }
+
   if (edition === 'switch2' && switch2Updates.length > 0) {
     const s2Group = switch2Updates[0];
     const s2Source = (s2Group.exefs || s2Group.romfs).source;

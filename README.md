@@ -73,6 +73,17 @@ Switch 2 output uses the edition's own name, icon, localized NACP and display ve
 `/Acd_1` inside the update's Control content, when available. Switch 1 output retains the
 base game's Control data. With `all`, the edition metadata is carried on its program package.
 
+Yoink opens and checks the Switch 2 executable before its RomFS and the DLC mounts.
+An installed edition whose executable cannot be opened stops preparation; it is not
+packed without its code. `--edition switch1` skips opening the Switch 2 program when
+writing a NUP. FTP browsing still prepares both programs.
+
+If opening content times out, restart the console application and the RPC run before
+retrying. On Linux, `export YOINK_TRACE=1` enables operation timing, the retained mount
+counts, and the program ID/storage/attributes sent to CodeFS. The failed operation's
+name is included in errors even without tracing. These diagnostics distinguish content
+selection failures from resource pressure; a timeout alone does not establish a mount limit.
+
 #### Add-on data patches
 
 An add-on can be updated by a data patch (content meta type `0x84`). Yoink reads its original add-on ID and application owner from content metadata, checks the add-on's matching patch reference when present, and pins the selected DLC version and content. Upgrade Packs use this: Tears of the Kingdom's Upgrade Pack `0100F2C0115B7001` v0 was built for an older Switch 2 program, and data patch `0100F2C0115B7801` brings it in line with the current one. Without it the Switch 2 program can't find its resource tables and crashes at boot.

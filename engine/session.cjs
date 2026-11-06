@@ -105,21 +105,28 @@ async function openServiceWithFallback({ s, sm, name }) {
 const tracing = Boolean(process.env.YOINK_TRACE || process.env.OZ_TRACE);
 
 function traceMethod(target, name, describe) {
-  if (!tracing || target[name].traced) return;
+  if (target[name].traced) return;
 
   const original = target[name];
   const traced = async function (...args) {
     const started = Date.now();
     const what = describe(...args);
     // anything still running after 10s gets announced, so a call that never returns is visible
-    const slow = setTimeout(() => console.log('  [trace] still waiting on ' + what), 10000);
+    const slow = tracing ? setTimeout(() => console.log('  [trace] still waiting on ' + what), 10000) : null;
 
     try {
       return await original.apply(this, args);
+    } catch (error) {
+      // Keep the failed operation visible even when trace logging is disabled.
+      if (!error.nativeResult && !error.consoleOperation) {
+        error.consoleOperation = what;
+        error.message = what + ': ' + error.message;
+      }
+      throw error;
     } finally {
       clearTimeout(slow);
       const took = Date.now() - started;
-      if (took >= 200) console.log('  [trace] ' + what + ': ' + took + ' ms');
+      if (tracing && took >= 200) console.log('  [trace] ' + what + ': ' + took + ' ms');
     }
   };
 

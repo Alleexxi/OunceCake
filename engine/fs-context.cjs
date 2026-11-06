@@ -145,6 +145,7 @@ async function registryReader(a) {
   const { traceMethod } = require('./session.cjs');
   traceMethod(memory, 'read', (at, length) => 'memory read ' + length + ' bytes');
   traceMethod(memory, 'write', (at) => 'memory write');
+  traceMethod(memory, 'pointer', () => 'memory pointer read');
 
   return { memory, layout };
 }
@@ -309,8 +310,15 @@ async function withProgramIndexMap({ attachment: a, title, runtimeProgramId, ope
   const mapping = { programId: runtimeProgramId, applicationId: title, programIndex, flags: 0 };
   const existing = before.find((row) => row.programId === runtimeProgramId);
   if (existing) {
+    if (existing.applicationId !== title || existing.programIndex !== programIndex) {
+      throw new Error('Existing program mapping for ' + runtimeProgramId +
+        ' does not match application ' + title + ' at program index ' + programIndex);
+    }
     return operation();
   }
+  // FS 810 does not clear the map when count is zero. Do not install a mapping
+  // that we cannot remove through the same API afterwards.
+  if (!before.length) throw new Error('Cannot temporarily map a program: the original program mapping list is empty');
   // fs 810 counts 0 as a no-op
   const active = normalized([...before, mapping]);
   let attempted = false;

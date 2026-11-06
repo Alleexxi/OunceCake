@@ -292,6 +292,7 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
   let registered;
   let attempted = false;
   let patch;
+  let previous;
 
   async function writeLocation(label, handle, input, location) {
     const filename = Buffer.alloc(0x300);
@@ -325,24 +326,29 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
       return handle;
     }
 
-    original = await resolver(originalSource.storage);
-
-    const patchResolver = await resolver(source.storage);
-    const basePath = await readLocation(a, original, title);
-    const patchPath = await readLocation(a, patchResolver, source.contentTitle);
-
-    const base = { ...basePath, storage: originalSource.storage };
-    patch = { ...patchPath, storage: source.storage };
-
-    // Program[1] (Switch 2 Edition) is its own complete NCA, not part of Program[0]'s patch content,
-    // so the location must point at its own resolved path or the loader opens the wrong NCA (InvalidNcaId)
-    if (programIndex) patch.contentPath = source.contentPath;
+    const base = { ...originalSource };
+    if (programIndex) {
+      // Program[1] is a standalone NCA. Both its path and attributes must come
+      // from the selected content, not the location resolver's Program[0].
+      const attributes = Buffer.alloc(16);
+      attributes[0] = source.attributes;
+      patch = { ...source, attributes: attributes.toString('hex') };
+    } else {
+      original = await resolver(originalSource.storage);
+      const patchResolver = await resolver(source.storage);
+      const basePath = await readLocation(a, original, title);
+      const patchPath = await readLocation(a, patchResolver, source.contentTitle);
+      if (!basePath || !patchPath) throw new Error('Selected base or update has no registered program location');
+      Object.assign(base, basePath);
+      patch = { ...patchPath, storage: source.storage };
+    }
 
     const opened = await a.s.ipc('Open registered patch resolver', lr, 1);
 
     if (opened.result) throw resultError('Open registered patch resolver', opened.result);
 
     registered = a.domain.oneHandle(opened);
+    previous = await readLocation(a, registered, runtimeProgramId);
     
     const input = Buffer.alloc(32);
     idBytes(runtimeProgramId).copy(input);
@@ -367,6 +373,14 @@ async function selectPatch({ attachment: a, title, source, originalSource, opera
     return result;
   }, async () => {
     if (!attempted) return;
+    if (previous) {
+      const input = Buffer.alloc(32);
+      idBytes(runtimeProgramId).copy(input);
+      idBytes(title).copy(input, 8);
+      Buffer.from(previous.attributes, 'hex').copy(input, 16);
+      await writeLocation('Restore previous program location', registered, input, previous);
+      return;
+    }
     const actual = await readLocation(a, registered, runtimeProgramId);
     if (!actual) return;
     success(await a.s.ipc('Remove owned patch location', registered, 2, idBytes(runtimeProgramId)),
@@ -518,6 +532,11 @@ function createProgramMounts(attachment) {
     input[1] = storage;
     input.writeBigUInt64LE(BigInt('0x' + title), 8);
 
+    if (process.env.YOINK_TRACE || process.env.OZ_TRACE) {
+      console.log('  [trace] CodeFS program=' + title + ' storage=' + storage +
+        ' attributes=0x' + attributes.toString(16));
+    }
+
     const size = 0x1a4;
     const address = s.base + 0x4000;
 
@@ -568,7 +587,7 @@ function createProgramMounts(attachment) {
         // base app and other parts can be on different devices (internal / sd). work that out
         const mountArgs = {
           title: selection.runtimeProgramId,
-          storage: selection.original.storage,
+          storage: args.programIndex ? selection.patch.storage : selection.original.storage,
           attributes: parseInt(selection.patch.attributes.slice(0, 2), 16),
         };
         if (args.section === 'exefs') return openCodeRaw(mountArgs);

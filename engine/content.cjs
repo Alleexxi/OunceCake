@@ -338,6 +338,29 @@ const resolveDlcContent = (options) => {
   return resolveContent({ ...options, contentType: 2, programIndex: content?.programIndex ?? options.programIndex ?? 0 });
 };
 
+async function verifyProgramSnapshot({ s, database, latestKey, sources }) {
+  const checked = new Map();
+  for (const source of sources) {
+    if (latestKey.readUInt32LE(8) !== source.version || latestKey[12] !== source.metaType) {
+      throw new Error('Selected program version changed; restart the dump');
+    }
+    const index = source.programIndex || 0;
+    const identity = source.contentType + ':' + index;
+    if (!checked.has(identity)) {
+      const input = Buffer.alloc(24);
+      input[0] = source.contentType;
+      input[1] = index;
+      latestKey.copy(input, 8);
+      const reply = success(await s.ipc('FTP verify selected program content', database, index ? 20 : 3, input),
+        'FTP verify selected program content');
+      checked.set(identity, reply.data.subarray(0, 16).toString('hex'));
+    }
+    if (checked.get(identity) !== source.contentId) {
+      throw new Error('Selected program content changed at index ' + index + '; restart the dump');
+    }
+  }
+}
+
 async function findOriginalContent(options) {
   for (const storage of [4, 5, 2]) {
     try {
@@ -508,7 +531,9 @@ async function readControl({ s, root, domain, service, filesystem }, title, stor
               icon = Buffer.concat(chunks, size);
             }
           }
-        } catch {}
+        } catch (error) {
+          if (!error.nativeResult) throw error;
+        }
 
         return { nacp, icon, ...controlDetails(nacp) };
       } catch (error) {
@@ -656,5 +681,5 @@ async function discoverGames({ s, root, domain, service, filesystem, shouldStop 
 module.exports = {
   discoverGames, discoverUpdates, discoverDlc, discoverDataPatches, listApplicationContent,
   resolveProgramContent, resolveDlcContent, findOriginalContent, findOriginalAddOn,
-  isInstalledUpdate, programMatchesApplication, readControl,
+  isInstalledUpdate, programMatchesApplication, readControl, verifyProgramSnapshot,
 };

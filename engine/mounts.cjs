@@ -1,10 +1,10 @@
 const path = require('node:path');
 const { TextDecoder } = require('node:util');
 const { success, pathRequest, idBytes, resultError, cleanup, withCleanup, closeHandles, throwIfCancelled } = require('./protocol.cjs');
-const { discoverUpdates, discoverDlc, discoverDataPatches, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl } = require('./content.cjs');
+const { discoverUpdates, discoverDlc, discoverDataPatches, resolveProgramContent, resolveDlcContent, programMatchesApplication, readControl, verifyProgramSnapshot } = require('./content.cjs');
 const { createProgramMounts, prepareInstalledLicense } = require('./program.cjs');
 const { matchingDlc, verifyDlcSnapshot } = require('./dlc.cjs');
-const { prepareBaseProgram } = require('./base-program.cjs');
+const { prepareBaseProgram, validateProgramEntries } = require('./base-program.cjs');
 
 // ncm mounts + metadata used for getting the ftp server ready
 
@@ -495,14 +495,18 @@ function buildIndex(views, { images = false } = {}) {
   return bytes;
 }
 
-async function prepareGame({ attachment: a, title, images = false, shouldStop = () => false }) {
+async function prepareGame({ attachment: a, title, images = false, edition = 'all', shouldStop = () => false }) {
   const views = [];
   const sources = [];
   const absentSources = [];
   const prepared = new Set();
   const files = createGameFiles(a);
-
   const cancelled = () => throwIfCancelled(shouldStop);
+  const readCodeHeader = async (mount, filename, length) => {
+    cancelled();
+    const opened = success(await a.filesystem.openFile(a.s, mount.handle, filename), 'Read composed program header');
+    return withCleanup(() => a.filesystem.readFile(a.s, opened.handle, 0, length), () => a.s.close(opened.handle));
+  };
 
   async function open(options) {
     cancelled();
@@ -548,6 +552,13 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
 
   async function mountView(prefix, section, candidates, allowAbsent = false) {
     const started = Date.now();
+    if (process.env.YOINK_TRACE || process.env.OZ_TRACE) {
+      console.log('  [trace] Before ' + prefix + '/' + section + ': ' +
+        sources.filter((source) => source.kind === 0).length + ' retained storages, ' +
+        sources.filter((source) => source.kind === 1).length + ' retained CodeFS, ' +
+        sources.filter((source) => source.kind === 2).length + ' deferred DLC, ' +
+        a.s.handles.size + ' tracked handles');
+    }
     try {
       return await mountViewTimed(prefix, section, candidates, allowAbsent);
     } finally {
@@ -581,14 +592,15 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
           return { source: error.source };
         }
 
-        lastError = error;
+        if (!lastError || error.source || !lastError.source) lastError = error;
       }
     }
 
     if (!mounted)
-      throw new Error(
+      throw Object.assign(new Error(
         'Could not prepare ' + prefix + '/' + section + ': ' + (lastError?.message || 'No installed content'),
-      );
+        { cause: lastError },
+      ), { nativeResult: lastError?.nativeResult, source: lastError?.source });
 
     let entries;
     try {
@@ -678,12 +690,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
   });
 
   const { base, composedUpdate } = await prepareBaseProgram({
-    title, mountView, installed, updateGroups,
-    readCodeHeader: async (mount, filename, length) => {
-      cancelled();
-      const opened = success(await a.filesystem.openFile(a.s, mount.handle, filename), 'Read composed program header');
-      return withCleanup(() => a.filesystem.readFile(a.s, opened.handle, 0, length), () => a.s.close(opened.handle));
-    },
+    title, mountView, installed, updateGroups, readCodeHeader,
   });
 
   // the control content (NACP + icon) names the title and lets a loader register it
@@ -695,6 +702,7 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
       if (control) console.log('Control: ' + (control.name || '(no name)') + (control.icon ? ', icon ' + control.icon.length + ' bytes' : ', no icon'));
       else console.log('Control: none found (the nup will have no name or icon)');
     } catch (error) {
+      if (!error.nativeResult) throw error;
       console.log('Could not read control content: ' + error.message);
     }
   }
@@ -713,6 +721,50 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
       'exefs',
       candidates.filter((candidate) => candidate.storage === update.source.storage),
     );
+  }
+
+  // Open the edition's code before DLC/data-patch storage consumes more FS resources.
+  // A missing Program[1] is optional; a failure opening an installed one is fatal.
+  let editionControlVersion = -1;
+  for (const group of (process.env.YOINK_NO_SWITCH2 || process.env.OZ_NO_SWITCH2 ||
+    (images && edition === 'switch1')) ? [] : updateGroups) {
+    const prefix = '/switch2/updates/' + group[0].version;
+    const candidates = group.map((item) => ({
+      storage: item.storage,
+      update: { contentTitle: item.contentTitle, version: item.version },
+      programIndex: 1,
+    }));
+
+    let program;
+
+    try {
+      program = await mountView(prefix, 'exefs', candidates);
+    } catch (error) {
+      // Only NCM reporting no Program[1] establishes that this is not an edition.
+      if (error.source || ![0xa05, 0xe05].includes(error.nativeResult?.canonical)) throw error;
+      console.log('No Switch 2 Edition program at ' + prefix + ': ' + error.message);
+      continue;
+    }
+
+    await validateProgramEntries(program.entries, (filename, size) => readCodeHeader(program, filename, size));
+    await mountView(
+      prefix,
+      'romfs',
+      candidates.filter((candidate) => candidate.storage === program.source.storage),
+    );
+
+    if (images && group[0].version > editionControlVersion) {
+      cancelled();
+      const editionControl = await readControl(a, title, [program.source.storage], {
+        update: { contentTitle: group[0].contentTitle, version: group[0].version },
+        programIndex: 1,
+      });
+      if (editionControl) {
+        control = { ...control, switch2: editionControl };
+        editionControlVersion = group[0].version;
+        console.log('Switch 2 Control: ' + (editionControl.name || '(no name)'));
+      }
+    }
   }
 
   for (const group of groups(dlc)) {
@@ -739,56 +791,8 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
         storage: record.storage, dlc: record, originalDlc,
       }))));
     } catch (error) {
-      if (error.code === 'FTP_CANCELLED') throw error;
+      if (!error.nativeResult || error.code === 'FTP_CANCELLED') throw error;
       console.log('Could not open data patch ' + prefix + ': ' + error.message);
-    }
-  }
-
-  // Switch 2 Edition program (id_offset 1) of every update, served at /switch2/updates/<ver>/romfs.
-  // Games without one just log a line; YOINK_NO_SWITCH2=1 skips the attempt
-  let editionControlVersion = -1;
-  for (const group of (process.env.YOINK_NO_SWITCH2 || process.env.OZ_NO_SWITCH2) ? [] : updateGroups) {
-    const prefix = '/switch2/updates/' + group[0].version;
-    const candidates = group.map((item) => ({
-      storage: item.storage,
-      update: { contentTitle: item.contentTitle, version: item.version },
-      programIndex: 1,
-    }));
-
-    let program;
-
-    try {
-      program = await mountView(prefix, 'romfs', candidates);
-    } catch (error) {
-      if (error.code === 'FTP_CANCELLED') throw error;
-
-      console.log('No Switch 2 Edition program at ' + prefix + ': ' + error.message);
-      continue;
-    }
-
-    try {
-      await mountView(
-        prefix,
-        'exefs',
-        candidates.filter((candidate) => candidate.storage === program.source.storage),
-      );
-    } catch (error) {
-      if (error.code === 'FTP_CANCELLED') throw error;
-
-      console.log('Could not open ' + prefix + '/exefs: ' + error.message);
-    }
-
-    if (images && group[0].version > editionControlVersion) {
-      cancelled();
-      const editionControl = await readControl(a, title, [program.source.storage], {
-        update: { contentTitle: group[0].contentTitle, version: group[0].version },
-        programIndex: 1,
-      });
-      if (editionControl) {
-        control = { ...control, switch2: editionControl };
-        editionControlVersion = group[0].version;
-        console.log('Switch 2 Control: ' + (editionControl.name || '(no name)'));
-      }
     }
   }
 
@@ -830,13 +834,10 @@ async function prepareGame({ attachment: a, title, images = false, shouldStop = 
         continue;
       }
 
-      const input = Buffer.alloc(24);
-      input[0] = source.contentType;
-      key.copy(input, 8);
-
-      const content = await a.s.ipc('FTP pin source content', database, 3, input);
-
-      if (content.result) throw resultError('FTP pin source content', content.result);
+      await verifyProgramSnapshot({ s: a.s, database, latestKey: key,
+        sources: selectedSources.filter((item) => item.storage === source.storage &&
+          (item.contentTitle || title) === contentTitle),
+      });
 
     } finally {
       await a.s.close(database);
