@@ -98,6 +98,18 @@ To see what a title has installed, and whether its data patches open:
 node yoink.cjs <path-to-ns2jb-run> <title id> --probe
 ```
 
+For a fuller read-only diagnostic, use the `debug` subcommand:
+
+```bash
+node yoink.cjs debug <path-to-ns2jb-run> <title id>
+```
+
+It prints installed content metadata and attempts the same base, update, DLC, and
+Switch 2 edition mounts used by a dump. The JSON report includes each layer's
+storage, content ID, NCA path, size, file counts, and available Control/NACP/icon
+details. It does not start FTP or write a NUP. Leave out the title ID to select a
+game from the library.
+
 ## Development
 
 Run `npm test` for the local FTP and NUP packing tests; no console is needed.

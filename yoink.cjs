@@ -4,7 +4,7 @@ const { isIPv4 } = require('node:net');
 const { createInterface } = require('node:readline');
 const { titleId, withCleanup } = require('./engine/protocol.cjs');
 const { attachGame } = require('./engine/session.cjs');
-const { discoverGames, discoverDataPatches, listApplicationContent } = require('./engine/content.cjs');
+const { discoverGames, discoverUpdates, discoverDataPatches, listApplicationContent, readControl } = require('./engine/content.cjs');
 const { prepareGame, probeDataPatches } = require('./engine/mounts.cjs');
 const { deployFtp, readImage } = require('./engine/ftp.cjs');
 const { packNup } = require('./engine/nup.cjs');
@@ -13,6 +13,7 @@ const { TerminalUI, supportsTui } = require('./engine/tui.cjs');
 const { resolveRun } = require('./engine/runtime.cjs');
 
 const USAGE = 'Usage: node yoink.cjs [run-directory|runs-directory] [title-id] [--port 2121] [--nup <out.nup>] [--ip <switch 2 ip>] [--edition switch2]\n' +
+              '       node yoink.cjs debug [run-directory|runs-directory] [title-id]\n' +
               'Enter an ns2jb run path once; Yoink remembers its parent and finds a live run next time\n' +
               'You can also provide a title ID to skip the selection menu and just mount a specific game\n' +
               'With --nup, Yoink downloads everything itself and writes a .nup instead of leaving the FTP up\n' +
@@ -20,7 +21,8 @@ const USAGE = 'Usage: node yoink.cjs [run-directory|runs-directory] [title-id] [
               'Interactive terminals open the TUI; --no-tui uses the plain-text interface\n' +
               '--edition picks how a Switch 2 Edition is packed: switch2 (default, one flattened Switch 2 package),\n' +
               '  switch1, both (one file each), or all (every dumped package in one file, as the NUP spec lays it out)\n' +
-              '--probe lists every installed content meta of the title (incl. add-on data patches) and exits\n';
+              '--probe lists every installed content meta of the title (incl. add-on data patches) and exits\n' +
+              'debug prints installed content, Control metadata, and the resolved base/update/DLC layers without starting FTP\n';
 
 function getArgs(argv) {
   const args = [];
@@ -29,7 +31,13 @@ function getArgs(argv) {
   let ip;
   let edition = 'switch2';
   let probe = false;
+  let debug = false;
   let noTui = false;
+
+  if (argv[0]?.toLowerCase() === 'debug') {
+    debug = true;
+    argv = argv.slice(1);
+  }
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -94,10 +102,78 @@ function getArgs(argv) {
   const [runArg, titleArg] = args.length === 1 && /^(?:0x)?[0-9a-fA-F]{16}$/.test(args[0])
     ? [undefined, args[0]] : args;
   const title = titleArg ? titleId(titleArg) : undefined;
-  return { run: runArg ? path.resolve(runArg) : undefined, title, port, nup: nup && path.resolve(nup), ip, edition, probe, noTui };
+  if (debug && (nup || probe)) throw new Error('debug cannot be combined with --nup or --probe\n' + USAGE);
+  return { run: runArg ? path.resolve(runArg) : undefined, title, port, nup: nup && path.resolve(nup), ip, edition, probe, debug, noTui };
 }
 
 const storageNames = { 2: 'Game card', 4: 'Internal', 5: 'SD' };
+const contentTypes = { 0x80: 'Application', 0x81: 'Patch', 0x82: 'AddOnContent', 0x83: 'Delta', 0x84: 'DataPatch' };
+
+function sourceDetails(source) {
+  if (!source) return null;
+  return {
+    contentTitle: source.contentTitle || source.applicationTitle,
+    version: source.version,
+    storage: storageNames[source.storage] || 'Unknown (' + source.storage + ')',
+    metaType: contentTypes[source.metaType] || '0x' + Number(source.metaType || 0).toString(16),
+    contentType: source.contentType,
+    programIndex: source.programIndex || 0,
+    contentId: source.contentId,
+    contentPath: source.contentPath,
+    attributes: '0x' + Number(source.attributes || 0).toString(16),
+    selection: source.selection || 'base',
+    runtimeProgramId: source.runtimeProgramId,
+    originalSource: source.originalSource ? sourceDetails(source.originalSource) : undefined,
+  };
+}
+
+function printDebugReport(title, content, updateControls, prepared, failure) {
+  const report = {
+    title: title.toUpperCase(),
+    installedContent: content.map((item) => ({
+      id: item.id.toUpperCase(), version: item.version,
+      type: contentTypes[item.type] || '0x' + item.type.toString(16),
+      storage: storageNames[item.storage] || 'Unknown (' + item.storage + ')',
+      installType: item.installType,
+    })),
+    updateControls,
+  };
+  if (prepared) {
+    report.control = prepared.control ? {
+      name: prepared.control.name, publisher: prepared.control.publisher, version: prepared.control.version,
+      nacpBytes: prepared.control.nacp?.length || 0, iconBytes: prepared.control.icon?.length || 0,
+      source: sourceDetails(prepared.control.source),
+      switch2: prepared.control.switch2 ? {
+        name: prepared.control.switch2.name, publisher: prepared.control.switch2.publisher,
+        version: prepared.control.switch2.version,
+        nacpBytes: prepared.control.switch2.nacp?.length || 0,
+        iconBytes: prepared.control.switch2.icon?.length || 0,
+        source: sourceDetails(prepared.control.switch2.source),
+      } : undefined,
+    } : null;
+    report.layers = prepared.views.map((view) => ({
+      path: view.path, kind: view.kind, size: view.size,
+      files: view.entries.filter((entry) => entry.type === 'file').length,
+      directories: view.entries.filter((entry) => entry.type === 'directory').length,
+      source: sourceDetails(view.source),
+    }));
+    report.sources = prepared.sources.map((item) => ({
+      kind: ['RomFS storage', 'CodeFS', 'deferred DLC'][item.kind] || item.kind,
+      size: item.size, source: sourceDetails(item.source),
+    }));
+  }
+  if (failure) report.prepareError = {
+    message: failure.message,
+    code: failure.code,
+    nativeResult: failure.nativeResult ? {
+      raw: failure.nativeResult.raw,
+      canonical: failure.nativeResult.canonical,
+      name: failure.nativeResult.name,
+    } : undefined,
+    source: sourceDetails(failure.source),
+  };
+  console.log(JSON.stringify(report, null, 2));
+}
 
 function gameMenu(games) {
   const width = String(games.length).length;
@@ -204,7 +280,7 @@ async function main(argv = process.argv.slice(2)) {
     }
     cancellation.abort();
   };
-  ui = !options.noTui && !probe && supportsTui()
+  ui = !options.noTui && !probe && !options.debug && supportsTui()
     ? new TerminalUI({ signal: cancellation.signal, onCancel: stop })
     : null;
   process.on('SIGINT', stop);
@@ -275,6 +351,48 @@ async function main(argv = process.argv.slice(2)) {
           if (r.regionLangMask) console.log('  RegionLangMask: ' + r.regionLangMask);
           for (const t of r.tables) console.log('  ' + t);
         }
+        return;
+      }
+      if (options.debug) {
+        const content = await listApplicationContent({ ...attachment, title });
+        const updateRecords = await discoverUpdates({ ...attachment, title });
+        const updateGroups = new Map();
+        for (const update of updateRecords) {
+          const key = update.contentTitle + ':' + update.version;
+          if (!updateGroups.has(key)) updateGroups.set(key, { ...update, storages: [] });
+          const group = updateGroups.get(key);
+          if (!group.storages.includes(update.storage)) group.storages.push(update.storage);
+        }
+        const updateControls = [];
+        for (const update of updateGroups.values()) {
+          let control = null;
+          let error;
+          try {
+            control = await readControl(attachment, title, update.storages, {
+              update: { contentTitle: update.contentTitle, version: update.version },
+            });
+          } catch (caught) {
+            error = caught.message;
+          }
+          updateControls.push({
+            contentTitle: update.contentTitle.toUpperCase(), version: update.version,
+            storages: update.storages.map((storage) => storageNames[storage] || storage),
+            control: control ? {
+              name: control.name, publisher: control.publisher, version: control.version,
+              nacpBytes: control.nacp?.length || 0, iconBytes: control.icon?.length || 0,
+              source: sourceDetails(control.source),
+            } : null,
+            error,
+          });
+        }
+        let prepared;
+        let failure;
+        try {
+          prepared = await prepareGame({ attachment, title, images: true, edition: 'all', shouldStop });
+        } catch (error) {
+          failure = error;
+        }
+        printDebugReport(title, content, updateControls, prepared, failure);
         return;
       }
       let host = ip;

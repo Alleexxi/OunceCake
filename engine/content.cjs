@@ -535,7 +535,7 @@ async function readControl({ s, root, domain, service, filesystem }, title, stor
           if (!error.nativeResult) throw error;
         }
 
-        return { nacp, icon, ...controlDetails(nacp) };
+        return { nacp, icon, source, ...controlDetails(nacp) };
       } catch (error) {
         if (!error.nativeResult) throw error;
         return null;
