@@ -699,6 +699,30 @@ async function prepareGame({ attachment: a, title, images = false, edition = 'al
     cancelled();
     try {
       control = await readControl(a, title, [base.source.storage, 4, 5, 2]);
+      if (control) console.log('Base Control: ' + (control.name || '(no name)') + (control.icon ? ', icon ' + control.icon.length + ' bytes' : ', no icon'));
+      else console.log('Base Control: none found');
+
+      if (!control?.icon) {
+        const patchTitle = (BigInt('0x' + title) + 0x800n).toString(16).padStart(16, '0');
+        const patchGroup = (composedUpdate && composedUpdate.contentTitle === patchTitle
+          ? updateGroups.find((group) => group[0].contentTitle === composedUpdate.contentTitle &&
+            group[0].version === composedUpdate.version)
+          : updateGroups.filter((group) => group[0].contentTitle === patchTitle)
+            .sort((left, right) => right[0].version - left[0].version)[0]);
+        if (patchGroup) {
+          const update = patchGroup[0];
+          const updateControl = await readControl(a, title, patchGroup.map((item) => item.storage), {
+            update: { contentTitle: update.contentTitle, version: update.version },
+          });
+          if (!control && updateControl) control = updateControl;
+          else if (control && updateControl?.icon) {
+            control = { ...control, icon: updateControl.icon, iconSource: updateControl.iconSource };
+          }
+          if (updateControl?.icon && control?.iconSource?.selection === 'update') {
+            console.log('Control icon fallback: update v' + update.version + ', ' + control.icon.length + ' bytes');
+          }
+        }
+      }
       if (control) console.log('Control: ' + (control.name || '(no name)') + (control.icon ? ', icon ' + control.icon.length + ' bytes' : ', no icon'));
       else console.log('Control: none found (the nup will have no name or icon)');
     } catch (error) {
@@ -726,7 +750,9 @@ async function prepareGame({ attachment: a, title, images = false, edition = 'al
   // Open the edition's code before DLC/data-patch storage consumes more FS resources.
   // A missing Program[1] is optional; a failure opening an installed one is fatal.
   let editionControlVersion = -1;
-  for (const group of (process.env.YOINK_NO_SWITCH2 || process.env.OZ_NO_SWITCH2 ||
+  // Program[1] is the Switch 2 counterpart only for Switch 1 titles. Native
+  // Switch 2 titles can also contain a second program, with separate rights.
+  for (const group of (!title.startsWith('01') || process.env.YOINK_NO_SWITCH2 || process.env.OZ_NO_SWITCH2 ||
     (images && edition === 'switch1')) ? [] : updateGroups) {
     const prefix = '/switch2/updates/' + group[0].version;
     const candidates = group.map((item) => ({

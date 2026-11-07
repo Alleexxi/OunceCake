@@ -143,12 +143,14 @@ function printDebugReport(title, content, updateControls, prepared, failure) {
       name: prepared.control.name, publisher: prepared.control.publisher, version: prepared.control.version,
       nacpBytes: prepared.control.nacp?.length || 0, iconBytes: prepared.control.icon?.length || 0,
       source: sourceDetails(prepared.control.source),
+      iconSource: sourceDetails(prepared.control.iconSource),
       switch2: prepared.control.switch2 ? {
         name: prepared.control.switch2.name, publisher: prepared.control.switch2.publisher,
         version: prepared.control.switch2.version,
         nacpBytes: prepared.control.switch2.nacp?.length || 0,
         iconBytes: prepared.control.switch2.icon?.length || 0,
         source: sourceDetails(prepared.control.switch2.source),
+        iconSource: sourceDetails(prepared.control.switch2.iconSource),
       } : undefined,
     } : null;
     report.layers = prepared.views.map((view) => ({
@@ -381,6 +383,7 @@ async function main(argv = process.argv.slice(2)) {
               name: control.name, publisher: control.publisher, version: control.version,
               nacpBytes: control.nacp?.length || 0, iconBytes: control.icon?.length || 0,
               source: sourceDetails(control.source),
+              iconSource: sourceDetails(control.iconSource),
             } : null,
             error,
           });
