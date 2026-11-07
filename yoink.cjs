@@ -167,6 +167,9 @@ function printDebugReport(title, content, updateControls, prepared, failure) {
   if (failure) report.prepareError = {
     message: failure.message,
     code: failure.code,
+    mountPath: failure.mountPath,
+    cause: failure.cause ? { message: failure.cause.message,
+      nativeResult: failure.cause.nativeResult } : undefined,
     nativeResult: failure.nativeResult ? {
       raw: failure.nativeResult.raw,
       canonical: failure.nativeResult.canonical,

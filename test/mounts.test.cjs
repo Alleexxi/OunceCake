@@ -11,7 +11,10 @@ const addon = { contentTitle: '0100e95004039001', storage: 4, version: 0 };
 
 // Mock the console-facing content/program services; exercise the actual mount
 // planner, RomFS parsing, ExeFS enumeration and failure handling together.
-function fixture(t, { missingProgram = false, failure, badHeader = false, secondStorageAbsent = false } = {}) {
+function fixture(t, { missingProgram = false, failure, badHeader = false, secondStorageAbsent = false,
+  title: selectedTitle = title, readControl = async () => null, baseFailure, licenseFailure } = {}) {
+  const selectedPatch = { ...patch,
+    contentTitle: (BigInt('0x' + selectedTitle) + 0x800n).toString(16).padStart(16, '0') };
   const calls = [];
   const bytes = Buffer.alloc(0x80000);
   const handles = new Set();
@@ -26,10 +29,11 @@ function fixture(t, { missingProgram = false, failure, badHeader = false, second
     selection: dlc ? 'dlc' : update ? 'update' : undefined,
     contentPath: '@UserContent://' + (dlc ? 'dlc' : 'program-' + programIndex) + '.nca', attributes: 0, programIndex,
   });
-  t.mock.method(content, 'discoverUpdates', async () => secondStorageAbsent ? [patch, { ...patch, storage: 5 }] : [patch]);
+  t.mock.method(content, 'discoverUpdates', async () => secondStorageAbsent ? [selectedPatch, { ...selectedPatch, storage: 5 }] : [selectedPatch]);
   t.mock.method(content, 'discoverDlc', async () => [addon]);
   t.mock.method(content, 'discoverDataPatches', async () => []);
-  t.mock.method(content, 'readControl', async () => null);
+  t.mock.method(content, 'readControl', readControl);
+  t.mock.method(program, 'prepareInstalledLicense', async () => { if (licenseFailure) throw licenseFailure; });
   t.mock.method(content, 'verifyProgramSnapshot', async ({ sources }) => {
     calls.push('verify:' + [...new Set(sources.map((source) => source.programIndex))].join(','));
   });
@@ -41,7 +45,7 @@ function fixture(t, { missingProgram = false, failure, badHeader = false, second
   });
   t.mock.method(content, 'resolveDlcContent', async (options) => sourceFor(options));
   t.mock.method(program, 'createProgramMounts', () => ({
-    async openCode() { calls.push('base:exefs'); return own(); },
+    async openCode() { calls.push('base:exefs'); if (baseFailure) throw baseFailure; return own(); },
     async openUpdate(options) {
       calls.push('program' + (options.programIndex || 0) + ':' + options.section);
       if (options.programIndex && options.section === 'exefs' && failure) throw failure;
@@ -81,7 +85,7 @@ function fixture(t, { missingProgram = false, failure, badHeader = false, second
         if (label === 'Read selected NCA ProgramId') {
           const filename = bytes.subarray(0x2000, 0x2301).toString();
           const data = Buffer.alloc(8);
-          data.writeBigUInt64LE(BigInt('0x' + (filename.includes('program-1') ? runtimeId : title)));
+          data.writeBigUInt64LE(BigInt('0x' + (filename.includes('program-1') ? runtimeId : selectedTitle)));
           return { result: 0, data };
         }
         assert.equal(label, 'OpenDataStorageByPath');
@@ -106,7 +110,7 @@ function fixture(t, { missingProgram = false, failure, badHeader = false, second
   delete require.cache[modulePath];
   const { prepareGame } = require(modulePath);
   t.after(() => { delete require.cache[modulePath]; });
-  return { calls, run: (options = {}) => prepareGame({ attachment, title, ...options }) };
+  return { calls, run: (options = {}) => prepareGame({ attachment, title: selectedTitle, ...options }) };
 }
 
 test('Switch 2 executable is validated before its RomFS and DLC mounts', async (t) => {
@@ -153,4 +157,51 @@ test('Switch 1 NUP preparation does not attempt Switch 2 CodeFS', async (t) => {
   const prepared = await f.run({ images: true, edition: 'switch1' });
   assert.ok(!f.calls.includes('program1:exefs'));
   assert.ok(!prepared.views.some((view) => view.path.startsWith('/switch2/')));
+});
+
+test('native Switch 2 game-key-card title never opens the edition Program[1]', async (t) => {
+  const f = fixture(t, { title: '0400e140216d4000',
+    failure: Object.assign(new Error('Requires original content'), { code: 'GAME_ORIGINAL_CONTENT_REQUIRED' }) });
+  const prepared = await f.run({ images: true });
+  assert.ok(f.calls.includes('program0:romfs'));
+  assert.ok(f.calls.includes('program0:exefs'));
+  assert.ok(!f.calls.includes('program1:exefs'));
+  assert.ok(!prepared.views.some((view) => view.path.startsWith('/switch2/')));
+});
+
+test('key-card icon comes from its matching update while base NACP is preserved', async (t) => {
+  const cardTitle = '0400e140216d4000';
+  const base = { name: 'Card name', nacp: Buffer.alloc(0x4000, 1), icon: null,
+    source: { storage: 2, metaType: 0x80 } };
+  const iconSource = { storage: 4, metaType: 0x81, selection: 'update' };
+  const update = { name: 'Update name', nacp: Buffer.alloc(0x4000, 2),
+    icon: Buffer.from('update icon'), source: iconSource, iconSource };
+  const controls = [];
+  const f = fixture(t, { title: cardTitle, readControl: async (attachment, title, storages, options) => {
+    controls.push({ title, storages, options });
+    return options?.update ? update : base;
+  } });
+  const prepared = await f.run({ images: true });
+  assert.equal(prepared.control.nacp, base.nacp);
+  assert.equal(prepared.control.name, base.name);
+  assert.equal(prepared.control.icon, update.icon);
+  assert.equal(prepared.control.iconSource, iconSource);
+  assert.deepEqual(controls[1], { title: cardTitle, storages: [4],
+    options: { update: { contentTitle: '0400e140216d4800', version: patch.version } } });
+});
+
+test('license preparation failure retains the mount, selected source and original FS error', async (t) => {
+  const baseFailure = resultError('Open selected game CodeFS', 0x7d802);
+  const licenseFailure = Object.assign(new Error('Requires original content'), {
+    code: 'GAME_ORIGINAL_CONTENT_REQUIRED' });
+  const f = fixture(t, { title: '0400e140216d4000', baseFailure, licenseFailure });
+  await assert.rejects(f.run({ images: true }), (error) => {
+    assert.equal(error, licenseFailure);
+    assert.equal(error.mountPath, '/base/exefs');
+    assert.equal(error.source.metaType, 0x80);
+    assert.equal(error.source.contentPath, '@UserContent://program-0.nca');
+    assert.equal(error.cause, baseFailure);
+    assert.ok(!f.calls.some((call) => call.startsWith('verify:')));
+    return true;
+  });
 });

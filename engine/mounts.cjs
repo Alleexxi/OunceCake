@@ -521,7 +521,13 @@ async function prepareGame({ attachment: a, title, images = false, edition = 'al
         throw error;
 
       prepared.add(error.source.contentPath);
-      await prepareInstalledLicense({ ...a, title, source: error.source });
+      try {
+        await prepareInstalledLicense({ ...a, title, source: error.source });
+      } catch (licenseError) {
+        licenseError.source ||= error.source;
+        licenseError.cause ||= error;
+        throw licenseError;
+      }
       cancelled();
       return files.open({ title, ...options });
     }
@@ -561,6 +567,9 @@ async function prepareGame({ attachment: a, title, images = false, edition = 'al
     }
     try {
       return await mountViewTimed(prefix, section, candidates, allowAbsent);
+    } catch (error) {
+      error.mountPath ||= prefix + '/' + section;
+      throw error;
     } finally {
       if (process.env.YOINK_TRACE || process.env.OZ_TRACE) console.log('  [trace] ' + prefix + '/' + section + ' took ' + ((Date.now() - started) / 1000).toFixed(1) + ' s');
     }
