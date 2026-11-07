@@ -169,7 +169,7 @@ test('native Switch 2 game-key-card title never opens the edition Program[1]', a
   assert.ok(!prepared.views.some((view) => view.path.startsWith('/switch2/')));
 });
 
-test('key-card icon comes from its matching update while base NACP is preserved', async (t) => {
+test('key-card icon fallback takes the whole control, NACP included, from its matching update', async (t) => {
   const cardTitle = '0400e140216d4000';
   const base = { name: 'Card name', nacp: Buffer.alloc(0x4000, 1), icon: null,
     source: { storage: 2, metaType: 0x80 } };
@@ -182,8 +182,8 @@ test('key-card icon comes from its matching update while base NACP is preserved'
     return options?.update ? update : base;
   } });
   const prepared = await f.run({ images: true });
-  assert.equal(prepared.control.nacp, base.nacp);
-  assert.equal(prepared.control.name, base.name);
+  assert.equal(prepared.control.nacp, update.nacp);
+  assert.equal(prepared.control.name, update.name);
   assert.equal(prepared.control.icon, update.icon);
   assert.equal(prepared.control.iconSource, iconSource);
   assert.deepEqual(controls[1], { title: cardTitle, storages: [4],

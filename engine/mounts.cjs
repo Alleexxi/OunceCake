@@ -723,10 +723,8 @@ async function prepareGame({ attachment: a, title, images = false, edition = 'al
           const updateControl = await readControl(a, title, patchGroup.map((item) => item.storage), {
             update: { contentTitle: update.contentTitle, version: update.version },
           });
-          if (!control && updateControl) control = updateControl;
-          else if (control && updateControl?.icon) {
-            control = { ...control, icon: updateControl.icon, iconSource: updateControl.iconSource };
-          }
+          // the update's whole control (NACP, name, version, publisher) goes with its icon
+          if (updateControl && (!control || updateControl.icon)) control = updateControl;
           if (updateControl?.icon && control?.iconSource?.selection === 'update') {
             console.log('Control icon fallback: update v' + update.version + ', ' + control.icon.length + ' bytes');
           }
